@@ -1,0 +1,18 @@
+# Ambiente virtual
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Dados locais
+*.db
+*.sqlite
+*.json
+log.txt
+
+# Config sensível
+.env
+
+# Sistema
+*.log

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard Multimoedas</title>
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+
+<div class="page-shell">
+
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">Motor de Decisão</p>
+      <h1>Dashboard Multimoedas</h1>
+      <p class="subtitle">Regimes, sinais e preços em tempo real</p>
+    </div>
+    <div class="header-meta">Atualiza a cada 30s</div>
+  </header>
+
+  <!-- GRÁFICOS -->
+  <section class="dashboard-grid">
+
+    <article class="chart-card">
+      <h2>USD/BRL</h2>
+      <div class="chart-box">
+        <div id="chart-usd"></div>
+      </div>
+    </article>
+
+    <article class="chart-card">
+      <h2>BTC/BRL</h2>
+      <div class="chart-box">
+        <div id="chart-btc"></div>
+      </div>
+    </article>
+
+    <article class="chart-card">
+      <h2>ETH/BRL</h2>
+      <div class="chart-box">
+        <div id="chart-eth"></div>
+      </div>
+    </article>
+
+    <article class="chart-card">
+      <h2>SOL/BRL</h2>
+      <div class="chart-box">
+        <div id="chart-sol"></div>
+      </div>
+    </article>
+
+  </section>
+
+</div>
+
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

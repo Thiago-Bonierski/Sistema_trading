@@ -1,0 +1,79 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #020617;
+  color: #e5e7eb;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+.page-shell {
+  max-width: 1300px;
+  margin: 0 auto;
+  padding: 32px;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 28px;
+}
+
+.eyebrow {
+  color: #60a5fa;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  font-size: 12px;
+}
+
+.subtitle {
+  color: #94a3b8;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+/* CARD DE GRÁFICO */
+.chart-card {
+  background: linear-gradient(
+    180deg,
+    rgba(15,23,42,0.95),
+    rgba(15,23,42,0.75)
+  );
+  border-radius: 18px;
+  padding: 16px 18px;
+  border: 1px solid rgba(148,163,184,0.15);
+  transition: border-color 0.25s ease;
+}
+
+/* CAIXA DO GRÁFICO */
+.chart-box {
+  height: 260px;            /* ✅ CONTROLE AQUI */
+  margin-top: 10px;
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.chart-box > div {
+  width: 100%;
+  height: 100%;
+}
+
+h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e5e7eb;
+}
+
+/* RESPONSIVO */
+@media (max-width: 900px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}
