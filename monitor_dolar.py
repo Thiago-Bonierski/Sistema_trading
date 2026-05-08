@@ -13,11 +13,15 @@ import os
 from typing import Optional, Dict, Any
 from datetime import datetime
 import logging
+import time
 
 import requests
 from dotenv import load_dotenv
 
 from logging_config import setup_logging
+
+_api_block_until = 0
+_last_quotes = {}
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -86,92 +90,81 @@ def enviar_mensagem(texto: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def pegar_cotacao(par: str = "USD-BRL") -> Optional[Dict[str, Any]]:
-    """
-    Busca cotação de um par de moedas via AwesomeAPI.
-    
-    Args:
-        par: Par de moedas no formato "XXX-YYY" (ex: "USD-BRL", "BTC-BRL")
-        
-    Returns:
-        Dicionário com dados da cotação:
-        {
-            'preco': float,      # Preço de venda (bid)
-            'horario': str,      # Horário formatado
-            'par': str,          # Par consultado
-            'timestamp': str     # Timestamp da consulta
-        }
-        
-        Retorna None se erro
-    """
+
+def pegar_cotacao(par: str = "USD-BRL"):
+    global _api_block_until
+
+    now = time.time()
+
+    # Se a API está em cooldown, não insiste
+    if now < _api_block_until:
+        logger.warning(
+            f"API em cooldown por rate limit. Ignorando {par} temporariamente."
+        )
+        return _last_quotes.get(par)
+
     url = f"{API_BASE_URL}/last/{par}"
-    
+
     try:
         headers = {"User-Agent": USER_AGENT}
         response = requests.get(url, headers=headers, timeout=API_TIMEOUT)
-        
-        # Verificar status
-        if response.status_code != 200:
-            logger.error(
-                f"Erro na API: Status {response.status_code} para {par}"
+
+        if response.status_code == 429:
+            logger.warning(
+                f"Rate limit da API atingido para {par}. Pausando consultas por 5 minutos."
             )
-            return None
-        
-        # Parsear resposta
+            _api_block_until = time.time() + 300  # 5 minutos
+
+            # Se existir última cotação válida, reutiliza
+            return _last_quotes.get(par)
+
+        if response.status_code != 200:
+            logger.error(f"Erro na API: Status {response.status_code} para {par}")
+            return _last_quotes.get(par)
+
         dados = response.json()
-        
-        # A API retorna chave sem hífen (ex: "USDBRL")
         chave = par.replace("-", "")
-        
+
         if chave not in dados:
             logger.error(f"Par {par} não encontrado na resposta da API")
-            return None
-        
+            return _last_quotes.get(par)
+
         cotacao_data = dados[chave]
-        
-        # Extrair e formatar dados
         preco = float(cotacao_data["bid"])
         timestamp = cotacao_data.get("timestamp", "")
-        
-        # Formatar horário
+
         try:
             if timestamp:
                 dt = datetime.fromtimestamp(int(timestamp))
                 horario = dt.strftime("%H:%M:%S")
             else:
                 horario = datetime.now().strftime("%H:%M:%S")
-        except (ValueError, OSError):
+        except Exception:
             horario = datetime.now().strftime("%H:%M:%S")
-        
+
         resultado = {
             "preco": preco,
             "horario": horario,
             "par": par,
             "timestamp": timestamp,
         }
-        
-        logger.debug(f"Cotação obtida: {par} = R$ {preco:.2f}")
-        
+
+        # Salva última cotação válida
+        _last_quotes[par] = resultado
+
         return resultado
-        
+
     except requests.exceptions.Timeout:
         logger.error(f"Timeout ao buscar cotação de {par}")
-        return None
-        
+        return _last_quotes.get(par)
+
     except requests.exceptions.RequestException as e:
         logger.error(f"Erro ao buscar cotação de {par}: {e}")
-        return None
-        
-    except (KeyError, ValueError) as e:
-        logger.error(f"Erro ao parsear resposta da API para {par}: {e}")
-        return None
-        
+        return _last_quotes.get(par)
+
     except Exception as e:
-        logger.error(
-            f"Erro inesperado ao buscar {par}: {e}",
-            exc_info=True
-        )
-        return None
+        logger.error(f"Erro inesperado ao buscar {par}: {e}", exc_info=True)
+        return _last_quotes.get(par)
 
 
 def verificar_configuracao() -> bool:
