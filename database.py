@@ -160,7 +160,7 @@ class DatabaseManager:
                     confidence REAL DEFAULT 0.0,
                     details TEXT,
                     ml_score REAL,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    collected_at_epoch INTEGER
                 )
             """)
             
@@ -186,6 +186,16 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            migrations = [
+                ("cotacoes", "engine", "TEXT"),
+                ("cotacoes", "confidence", "REAL"),
+                ("cotacoes", "details", "TEXT"),
+                ("cotacoes", "ml_score", "REAL"),
+                ("cotacoes", "collected_at_epoch", "INTEGER"),
+                ("trade_history", "position_size", "REAL"),
+                ("trade_history", "aggressiveness", "TEXT"),
+            ]
             
             # Criar índices para performance (se não existirem)
             self._create_indexes(cursor)
@@ -272,7 +282,7 @@ def init_database() -> None:
         ("cotacoes", "confidence", "REAL"),
         ("cotacoes", "details", "TEXT"),
         ("cotacoes", "ml_score", "REAL"),
-        ("cotacoes", "created_at", "TEXT DEFAULT CURRENT_TIMESTAMP"),
+        ("cotacoes", "collected_at_epoch", "INTEGER"),
         ("trade_history", "position_size", "REAL"),
         ("trade_history", "aggressiveness", "TEXT"),
     ]
@@ -292,7 +302,8 @@ def salvar_cotacao(horario: str, preco: float, moeda: str,
                    engine: Optional[str] = None,
                    confidence: float = 0.0,
                    details: str = "",
-                   ml_score: Optional[float] = None) -> None:
+                   ml_score: Optional[float] = None,
+                   collected_at_epoch: Optional[int] = None) -> None:
     """
     Salva cotação no banco.
     
@@ -306,15 +317,16 @@ def salvar_cotacao(horario: str, preco: float, moeda: str,
         confidence: Confiança do sinal
         details: Detalhes adicionais
         ml_score: Score do classificador ML
+        collected_at_epoch: Optional[int] = None) -> None:
     """
     query = """
         INSERT INTO cotacoes 
-        (horario, preco, moeda, recomendacao, regime, engine, confidence, details, ml_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (horario, preco, moeda, recomendacao, regime, engine, confidence, details, ml_score, collected_at_epoch)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     db_manager.execute(query, (
         horario, preco, moeda, recomendacao, regime, 
-        engine, confidence, details, ml_score
+        engine, confidence, details, ml_score, collected_at_epoch
     ))
 
 

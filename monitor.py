@@ -66,6 +66,137 @@ position_manager = PositionManager(equity_manager, risk_controller)
 kpi_tracker = KPITracker()
 
 
+def get_last_collection_epoch(symbol: str) -> Optional[int]:
+    """
+    Retorna o horário epoch da última coleta salva para o símbolo.
+    Usado para detectar buracos temporais entre execuções.
+    """
+    query = """
+        SELECT collected_at_epoch
+        FROM cotacoes
+        WHERE moeda = ?
+          AND collected_at_epoch IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """
+
+    try:
+        row = db_manager.fetch_one(query, (symbol,))
+        if row and row["collected_at_epoch"]:
+            return int(row["collected_at_epoch"])
+        return None
+    except Exception as e:
+        logger.error(f"Erro ao buscar última coleta de {symbol}: {e}", exc_info=True)
+        return None
+
+
+def close_position_due_to_data_gap(
+    symbol: str,
+    preco: float,
+    collected_at_epoch: int,
+    gap_seconds: int
+) -> None:
+    """
+    Fecha posição aberta quando ocorre DATA_GAP.
+
+    Isso evita que uma posição fique aberta após horas sem dados,
+    o que poderia distorcer PnL, duração e lógica de risco.
+    """
+    position = position_manager.get_position(symbol)
+
+    if position is None:
+        return
+
+    logger.warning(
+        f"🔴 Fechando posição em {symbol} por DATA_GAP "
+        f"({gap_seconds}s sem coleta)."
+    )
+
+    trade_result = position_manager.close_position(
+        symbol=symbol,
+        exit_price=preco,
+        exit_regime="DATA_GAP",
+        reason=f"data_gap_{gap_seconds}s"
+    )
+
+    if not trade_result:
+        return
+
+    # Atualizar equity
+    pnl_amount = trade_result["pnl"]
+    equity_manager.update_equity(pnl_amount)
+
+    # Atualizar RiskController
+    risk_controller.close_position(symbol)
+
+    # Registrar KPI
+    kpi_tracker.record_trade_result(trade_result)
+
+    # Salvar no banco
+    salvar_trade_history(trade_result)
+
+    # Log estruturado
+    log_trade_execution(logger, trade_result)
+
+    # Notificar Telegram
+    try:
+        enviar_mensagem(
+            f"⚠️ POSIÇÃO FECHADA POR DATA GAP ({symbol})\n"
+            f"Gap: {gap_seconds}s sem coleta\n"
+            f"Preço de saída: R$ {preco:.2f}\n"
+            f"PnL: {trade_result['pnl']:+.2f}"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao enviar mensagem de DATA_GAP: {e}")
+
+
+def handle_data_gap(
+    symbol: str,
+    preco: float,
+    horario: str,
+    collected_at_epoch: int,
+    gap_seconds: int
+) -> None:
+    """
+    Registra um gap de dados e impede que o sistema misture histórico antigo
+    com dados novos.
+
+    Se houver posição aberta, pode fechá-la automaticamente para evitar
+    comportamento inconsistente após retorno da API.
+    """
+    logger.warning(
+        f"⏸️ DATA GAP detectado em {symbol}: {gap_seconds}s sem coleta. "
+        f"Resetando continuidade do histórico."
+    )
+
+    # Fechar posição aberta, se configurado
+    if getattr(config, "CLOSE_POSITION_ON_DATA_GAP", False):
+        close_position_due_to_data_gap(
+            symbol=symbol,
+            preco=preco,
+            collected_at_epoch=collected_at_epoch,
+            gap_seconds=gap_seconds
+        )
+
+    # Registrar ponto de quebra no banco
+    salvar_cotacao(
+        horario=horario,
+        preco=preco,
+        moeda=symbol,
+        recomendacao=config.DATA_GAP_RECOMMENDATION,
+        regime="AGUARDANDO",
+        engine="GapGuard",
+        confidence=0.0,
+        details=f"Gap de dados detectado: {gap_seconds}s sem coleta",
+        ml_score=None,
+        collected_at_epoch=collected_at_epoch,
+    )
+
+    # Resetar estados internos para evitar continuidade falsa
+    ultimo_status[symbol] = "NEUTRO"
+    ultimo_regime[symbol] = None
+    
+
 def ensure_reports_dir() -> Path:
     """
     Garante que diretório de relatórios existe.
@@ -165,41 +296,48 @@ def training_loop(trainer, kpi_tracker_ref: KPITracker) -> None:
 
 def analisar_tendencia(moeda_nome: str, preco_atual: float) -> pd.Series:
     """
-    Busca histórico de preços do banco de dados.
-    
-    Args:
-        moeda_nome: Nome da moeda (USD, BTC, ETH, SOL)
-        preco_atual: Preço atual
-
-    Returns:
-        Série pandas com histórico de preços
+    Busca histórico recente de preços, ignorando dados anteriores ao último DATA_GAP.
     """
-    query = """
-        SELECT preco 
-        FROM cotacoes 
-        WHERE moeda = ? 
-        ORDER BY id DESC 
-        LIMIT 50
-    """
-    
     try:
-        rows = db_manager.fetch_all(query, (moeda_nome,))
-        
-        # Extrair preços
-        historico = [preco_atual] + [row['preco'] for row in rows]
-        
-        logger.debug(
-            f"Histórico carregado para {moeda_nome}: {len(historico)} pontos"
+        # Buscar último ponto de quebra de continuidade
+        gap_row = db_manager.fetch_one(
+            """
+            SELECT MAX(id) as last_gap_id
+            FROM cotacoes
+            WHERE moeda = ?
+              AND recomendacao = ?
+            """,
+            (moeda_nome, config.DATA_GAP_RECOMMENDATION)
         )
-        
+
+        last_gap_id = gap_row["last_gap_id"] if gap_row and gap_row["last_gap_id"] else 0
+
+        query = """
+            SELECT preco 
+            FROM cotacoes 
+            WHERE moeda = ?
+              AND id > ?
+            ORDER BY id DESC 
+            LIMIT 50
+        """
+
+        rows = db_manager.fetch_all(query, (moeda_nome, last_gap_id))
+
+        historico = [preco_atual] + [row["preco"] for row in rows]
+
+        logger.debug(
+            f"Histórico carregado para {moeda_nome}: {len(historico)} pontos "
+            f"(após gap_id={last_gap_id})"
+        )
+
         return pd.Series(historico)
-        
+
     except Exception as e:
         logger.error(
             f"Erro ao buscar histórico de {moeda_nome}: {e}",
             exc_info=True
         )
-        # Retornar apenas preço atual em caso de erro
+        
         return pd.Series([preco_atual])
 
 
@@ -302,7 +440,22 @@ def process_symbol(symbol: str, tick_count: int) -> None:
     preco = float(cotacao_data['preco'])
     horario = cotacao_data.get('horario', time.strftime("%H:%M:%S"))
     nome_db = symbol
-    
+    collected_at_epoch = int(time.time())
+
+    last_collection_epoch = get_last_collection_epoch(nome_db)
+
+    if last_collection_epoch is not None:
+        gap_seconds = collected_at_epoch - last_collection_epoch
+
+        if gap_seconds > config.MAX_DATA_GAP_SECONDS:
+            handle_data_gap(
+                symbol=nome_db,
+                preco=preco,
+                horario=horario,
+                collected_at_epoch=collected_at_epoch,
+                gap_seconds=gap_seconds
+            )
+            return
     logger.debug(f"{symbol}: R$ {preco:.2f}")
     
     # Analisar tendência e regime
@@ -327,7 +480,7 @@ def process_symbol(symbol: str, tick_count: int) -> None:
     # Verificar exaustão
     if is_exhausted(symbol, regime):
         logger.debug(f"{symbol} está em estado de exaustão, aguardando...")
-        # Salvar estado neutro
+
         salvar_cotacao(
             horario=horario,
             preco=preco,
@@ -337,6 +490,8 @@ def process_symbol(symbol: str, tick_count: int) -> None:
             engine="ExhaustionFilter",
             confidence=0.0,
             details="Símbolo em exaustão",
+            ml_score=None,
+            collected_at_epoch=collected_at_epoch,
         )
         return
     
@@ -415,6 +570,7 @@ def process_symbol(symbol: str, tick_count: int) -> None:
         confidence=resultado.get("confidence", 0.0),
         details=resultado.get("details", ""),
         ml_score=resultado.get("ml_score"),
+        collected_at_epoch=collected_at_epoch,
     )
     
     # Notificar mudança de status

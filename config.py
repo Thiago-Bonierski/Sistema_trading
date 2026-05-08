@@ -9,6 +9,16 @@ from pathlib import Path
 from typing import Dict
 
 # ============================================================================
+# DATA GAP PROTECTION
+# ============================================================================
+
+MAX_DATA_GAP_SECONDS = 600  # 10 minutos
+DATA_GAP_RECOMMENDATION = "DATA_GAP"
+
+# Se True, fecha posição aberta automaticamente quando detectar DATA_GAP
+CLOSE_POSITION_ON_DATA_GAP = True
+
+# ============================================================================
 # PATHS E ARQUIVOS
 # ============================================================================
 BASE_DIR = Path(__file__).parent
