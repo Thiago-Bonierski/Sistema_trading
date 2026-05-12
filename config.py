@@ -8,6 +8,16 @@ import os
 from pathlib import Path
 from typing import Dict
 
+from dotenv import load_dotenv
+
+# ============================================================================
+# PATHS E ARQUIVOS
+# ============================================================================
+BASE_DIR = Path(__file__).parent
+
+# Carregar .env explicitamente a partir da pasta do projeto
+load_dotenv(BASE_DIR / ".env")
+
 # ============================================================================
 # DATA GAP PROTECTION
 # ============================================================================
@@ -143,7 +153,7 @@ ML_APPROVAL_THRESHOLD = 0.58       # Threshold para aprovar trades
 # MONITORING
 # ============================================================================
 
-MONITORING_INTERVAL_SECONDS = 90   # Intervalo entre checks
+MONITORING_INTERVAL_SECONDS = 60   # Intervalo entre checks
 TRAINING_INTERVAL_SECONDS = 3600   # Treinar ML a cada 1 hora
 KPI_REPORT_INTERVAL_SECONDS = 900  # KPIs a cada 15 minutos
 
@@ -177,6 +187,7 @@ MAX_TRADES_IN_REPORT = 1000        # Máximo de trades detalhados em relatório
 FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 FLASK_HOST = os.getenv('FLASK_HOST', '127.0.0.1')
 FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
+CONTROL_TOKEN = os.getenv("CONTROL_TOKEN", None)  # Token para autenticação de controle
 
 # ============================================================================
 # SIMULATION

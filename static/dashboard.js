@@ -172,3 +172,67 @@ function atualizarDashboard() {
 
 atualizarDashboard();
 setInterval(atualizarDashboard, 30000);
+
+async function enviarComandoControle(endpoint, mensagemConfirmacao) {
+  const confirmou = confirm(mensagemConfirmacao);
+
+  if (!confirmou) {
+    return;
+  }
+
+  const token = prompt("Digite o token de controle:");
+
+  if (!token) {
+    alert("Operação cancelada: token vazio.");
+    return;
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Control-Token": token
+      },
+      body: JSON.stringify({
+        source: "dashboard"
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.ok) {
+      alert(`Erro: ${data.error || "falha desconhecida"}`);
+      return;
+    }
+
+    alert(data.message || "Comando executado com sucesso.");
+
+  } catch (error) {
+    console.error("Erro ao enviar comando:", error);
+    alert("Erro ao enviar comando de controle.");
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const btnStop = document.getElementById("btn-stop-monitor");
+  const btnExit = document.getElementById("btn-exit-process");
+
+  if (btnStop) {
+    btnStop.addEventListener("click", () => {
+      enviarComandoControle(
+        "/api/shutdown_monitor",
+        "Deseja pausar o monitoramento? O site continuará aberto."
+      );
+    });
+  }
+
+  if (btnExit) {
+    btnExit.addEventListener("click", () => {
+      enviarComandoControle(
+        "/api/exit_process",
+        "ATENÇÃO: isso encerrará o processo inteiro e liberará a porta. Continuar?"
+      );
+    });
+  }
+});

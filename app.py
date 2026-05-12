@@ -8,10 +8,11 @@ Fornece endpoints para visualizar:
 - Histórico de trades
 """
 import threading
+import os
 from typing import Dict, List, Any, Optional
 import logging
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import pandas as pd
 
 import config
@@ -293,6 +294,120 @@ def health():
         "service": "trading-dashboard"
     })
 
+
+def _validar_token_controle():
+    """Valida token simples para ações críticas pelo dashboard."""
+    token_configurado = getattr(config, "CONTROL_TOKEN", "")
+
+    if not token_configurado:
+        return False
+
+    token_recebido = request.headers.get("X-Control-Token", "")
+
+    return token_recebido == token_configurado
+
+
+def _montar_resumo_shutdown():
+    """Monta resumo simples do estado do sistema antes de parar."""
+    try:
+        from monitor import kpi_tracker, risk_controller, equity_manager, position_manager
+
+        kpis = kpi_tracker.summary()
+        risk = risk_controller.get_risk_status()
+        equity = equity_manager.get_summary()
+        open_positions = list(position_manager.positions.keys())
+
+        resumo = (
+            "🛑 SISTEMA ENCERRADO PELO DASHBOARD\n\n"
+            f"📊 Trades: {kpis.get('trade_count', 0)}\n"
+            f"🎯 Win rate: {kpis.get('win_rate', 0.0) * 100:.1f}%\n"
+            f"💰 PnL total: {kpis.get('total_pnl', 0.0):+.2f}\n"
+            f"📈 Equity atual: R$ {equity.get('current_equity', 0.0):,.2f}\n"
+            f"📉 Drawdown atual: {equity.get('current_drawdown_pct', 0.0):.2f}%\n"
+            f"🧯 Modo risco: {risk.get('aggressiveness_level', 'UNKNOWN')}\n"
+            f"🚫 Trades bloqueados: {risk.get('blocked_trades', 0)}\n"
+            f"📌 Posições abertas: {open_positions if open_positions else 'nenhuma'}"
+        )
+
+        return resumo
+
+    except Exception as e:
+        logger.error(f"Erro ao montar resumo de shutdown: {e}", exc_info=True)
+        return "🛑 SISTEMA ENCERRADO PELO DASHBOARD\n\nResumo indisponível por erro interno."
+
+
+@app.route("/api/shutdown_monitor", methods=["POST"])
+def shutdown_monitor():
+    """
+    Para apenas o loop de monitoramento.
+    O Flask continua rodando e o site permanece acessível.
+    """
+    if not _validar_token_controle():
+        return jsonify({"ok": False, "error": "Token inválido"}), 403
+
+    try:
+        from monitor import shutdown_gracefully, stop_event
+        from monitor_dolar import enviar_mensagem
+
+        if stop_event.is_set():
+            return jsonify({"ok": True, "message": "Monitor já estava parado"})
+
+        resumo = _montar_resumo_shutdown()
+        enviar_mensagem(resumo)
+
+        shutdown_gracefully()
+
+        logger.warning("🛑 Monitor parado via dashboard")
+
+        return jsonify({
+            "ok": True,
+            "message": "Monitor parado com sucesso. Flask continua ativo."
+        })
+
+    except Exception as e:
+        logger.error(f"Erro ao parar monitor via dashboard: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/exit_process", methods=["POST"])
+def exit_process():
+    """
+    Encerra o processo inteiro.
+    Isso libera a porta 5000.
+
+    Use somente em ambiente local/controlado.
+    """
+    if not _validar_token_controle():
+        return jsonify({"ok": False, "error": "Token inválido"}), 403
+
+    try:
+        from monitor import shutdown_gracefully
+        from monitor_dolar import enviar_mensagem
+
+        resumo = _montar_resumo_shutdown()
+        enviar_mensagem(resumo)
+
+        shutdown_gracefully()
+
+        logger.critical("🛑 Processo inteiro será encerrado via dashboard")
+
+        def matar_processo():
+            os._exit(0)
+
+        # Dá tempo de retornar a resposta HTTP antes de matar o processo
+        timer = threading.Timer(1.0, matar_processo)
+        timer.daemon = True
+        timer.start()
+
+        return jsonify({
+            "ok": True,
+            "message": "Processo será encerrado em 1 segundo. A porta será liberada."
+        })
+
+    except Exception as e:
+        logger.error(f"Erro ao encerrar processo via dashboard: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+    
 
 def start_flask_app() -> None:
     """
