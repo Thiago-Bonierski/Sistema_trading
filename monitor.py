@@ -53,6 +53,19 @@ ultimo_regime: Dict[str, Optional[str]] = {
     "ETH": None,
     "SOL": None,
 }
+trend_confirmation_count: Dict[str, int] = {
+    "USD": 0,
+    "BTC": 0,
+    "ETH": 0,
+    "SOL": 0,
+}
+
+last_trend_regime: Dict[str, Optional[str]] = {
+    "USD": None,
+    "BTC": None,
+    "ETH": None,
+    "SOL": None,
+}
 
 # Stop event para shutdown gracioso
 stop_event = threading.Event()
@@ -195,6 +208,8 @@ def handle_data_gap(
     # Resetar estados internos para evitar continuidade falsa
     ultimo_status[symbol] = "NEUTRO"
     ultimo_regime[symbol] = None
+    trend_confirmation_count[symbol] = 0
+    last_trend_regime[symbol] = None
     
 
 def ensure_reports_dir() -> Path:
@@ -417,6 +432,97 @@ def loop_monitoramento() -> None:
         logger.info("Loop de monitoramento finalizado")
 
 
+def update_trend_confirmation(symbol: str, regime: str) -> int:
+    """
+    Atualiza contador de confirmação de tendência.
+
+    A ideia é exigir que TENDENCIA_ALTA ou TENDENCIA_BAIXA apareça
+    por alguns ciclos consecutivos antes de permitir nova entrada.
+
+    Args:
+        symbol: Símbolo do ativo.
+        regime: Regime atual detectado.
+
+    Returns:
+        Número atual de confirmações consecutivas.
+    """
+    if regime not in ("TENDENCIA_ALTA", "TENDENCIA_BAIXA"):
+        trend_confirmation_count[symbol] = 0
+        last_trend_regime[symbol] = None
+        return 0
+
+    if last_trend_regime[symbol] == regime:
+        trend_confirmation_count[symbol] += 1
+    else:
+        last_trend_regime[symbol] = regime
+        trend_confirmation_count[symbol] = 1
+
+    return trend_confirmation_count[symbol]
+
+
+def apply_trend_confirmation_filter(
+    symbol: str,
+    regime: str,
+    suggestion: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Bloqueia entradas em tendência antes de confirmação mínima.
+
+    Não bloqueia:
+    - NEUTRO
+    - SAIR
+    - HOLD
+    - saída de posição existente
+
+    Bloqueia apenas nova COMPRA/VENDA quando a tendência ainda não
+    apareceu por ciclos suficientes.
+    """
+    action = suggestion.get("action", "NEUTRO")
+
+    if action not in ("COMPRA", "VENDA"):
+        return suggestion
+
+    # Se já existe posição aberta, não bloquear.
+    # A posição precisa continuar sendo gerenciada normalmente.
+    if position_manager.get_position(symbol) is not None:
+        return suggestion
+
+    required_ticks = getattr(config, "TREND_CONFIRMATION_TICKS", 2)
+    confirmation_count = trend_confirmation_count.get(symbol, 0)
+
+    # Garantir alinhamento entre ação e regime
+    expected_regime = "TENDENCIA_ALTA" if action == "COMPRA" else "TENDENCIA_BAIXA"
+
+    if regime != expected_regime:
+        filtered = suggestion.copy()
+        filtered["action"] = "NEUTRO"
+        filtered["confidence"] = 0.0
+        filtered["details"] = (
+            f"Sinal {action} bloqueado: regime {regime} não confirma {expected_regime}"
+        )
+        filtered["engine"] = "TrendConfirmationFilter"
+        return filtered
+
+    if confirmation_count < required_ticks:
+        filtered = suggestion.copy()
+        filtered["action"] = "NEUTRO"
+        filtered["confidence"] = 0.0
+        filtered["details"] = (
+            f"Aguardando confirmação de tendência "
+            f"({confirmation_count}/{required_ticks})"
+        )
+        filtered["engine"] = "TrendConfirmationFilter"
+
+        logger.info(
+            f"⏳ {symbol}: entrada {action} bloqueada por confirmação "
+            f"({confirmation_count}/{required_ticks}) em {regime}"
+        )
+
+        return filtered
+
+    return suggestion
+
+
 def process_symbol(symbol: str, tick_count: int) -> None:
     """
     Processa um símbolo individual.
@@ -462,6 +568,9 @@ def process_symbol(symbol: str, tick_count: int) -> None:
     historico_precos = analisar_tendencia(nome_db, preco)
     regime_info = analyze_regime(historico_precos)
     regime = regime_info["regime"]
+
+    # Atualizar confirmação de tendência
+    confirmation_count = update_trend_confirmation(nome_db, regime)
     
     # Detectar mudança de regime
     if regime != ultimo_regime[nome_db]:
@@ -501,6 +610,13 @@ def process_symbol(symbol: str, tick_count: int) -> None:
         regime=regime,
         regime_metrics=regime_info,
         prices=historico_precos
+    )
+
+    # Aplicar filtro de confirmação de tendência antes do ML e antes da posição
+    resultado = apply_trend_confirmation_filter(
+        symbol=nome_db,
+        regime=regime,
+        suggestion=resultado
     )
     
     # Aplicar filtro ML se disponível

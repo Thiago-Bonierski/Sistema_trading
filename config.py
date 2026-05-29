@@ -153,9 +153,10 @@ ML_APPROVAL_THRESHOLD = 0.58       # Threshold para aprovar trades
 # MONITORING
 # ============================================================================
 
-MONITORING_INTERVAL_SECONDS = 60   # Intervalo entre checks
+MONITORING_INTERVAL_SECONDS = 20   # Intervalo entre checks
 TRAINING_INTERVAL_SECONDS = 3600   # Treinar ML a cada 1 hora
 KPI_REPORT_INTERVAL_SECONDS = 900  # KPIs a cada 15 minutos
+TREND_CONFIRMATION_TICKS = 2       # Número de ticks para confirmar tendência
 
 MIN_TRADES_FOR_TRAINING = 30       # Mínimo de trades para treinar ML
 
