@@ -350,15 +350,6 @@ pytest tests/ --cov=. --cov-report=term-missing
 
 ---
 
-## Proximos Passos
-
-- Adicionar suporte a mais estrategias plugaveis via interface `BaseStrategyEngine`
-- Integrar dados de volume para confirmar rompimentos no BreakoutMomentum
-- Ampliar cobertura de testes para `RiskController` e `StrategyOrchestrator`
-- Adicionar endpoint de historico de equity para visualizacao da curva de capital no dashboard
-
----
-
 ## Licenca
 
 Uso pessoal e educacional. Nao constitui recomendacao de investimento.
