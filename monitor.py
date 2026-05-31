@@ -28,7 +28,7 @@ from logging_config import (
     log_regime_change,
     log_risk_event,
 )
-from monitor_dolar import pegar_cotacao, enviar_mensagem
+from monitor_base import pegar_cotacao, enviar_mensagem
 from market_regime import analyze_regime
 from strategy_unified import StrategyOrchestrator
 from ml_classifier import MLClassifier

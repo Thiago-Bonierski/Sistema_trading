@@ -194,7 +194,7 @@ CONTROL_TOKEN = os.getenv("CONTROL_TOKEN", None)  # Token para autenticação de
 # SIMULATION
 # ============================================================================
 
-INITIAL_CAPITAL = 10000.0  # Capital inicial para simulações
+INITIAL_CAPITAL = 100000.0  # Capital inicial para simulações
 
 # ============================================================================
 # LOGGING

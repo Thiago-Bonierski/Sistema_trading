@@ -78,15 +78,37 @@ def analyze_regime(prices: pd.Series) -> Dict[str, Any]:
     media_longa_atual = short_trend.mean()
     media_longa_passada = previous_trend.mean()
 
-    slope = (media_longa_atual - media_longa_passada) / media_longa_passada
-    range_rel = (recent.max() - recent.min()) / current
+    # Proteção contra divisão por zero
+    if is_close(media_longa_passada, 0.0):
+        slope = 0.0
+    else:
+        slope = (media_longa_atual - media_longa_passada) / media_longa_passada
+    
+    if is_close(current, 0.0):
+        range_rel = 0.0
+    else:
+        range_rel = (recent.max() - recent.min()) / current
 
     returns = prices.pct_change().abs().dropna()
-    short_volatility = returns.rolling(10).std().iloc[9]
-    long_volatility = returns.rolling(20).std().iloc[19]
+    
+    # Proteção para séries muito curtas ou vazias
+    if len(returns) >= 10:
+        short_volatility = returns.rolling(10).std().iloc[9]
+    else:
+        short_volatility = 0.0
+    
+    if len(returns) >= 20:
+        long_volatility = returns.rolling(20).std().iloc[19]
+    else:
+        long_volatility = 0.0
+    
     volatility_ratio = short_volatility / long_volatility if long_volatility and not pd.isna(long_volatility) else 0.0
 
-    momentum = (current - prices.iloc[4]) / prices.iloc[4]
+    # Proteção contra divisão por zero no momentum
+    if is_close(prices.iloc[4], 0.0):
+        momentum = 0.0
+    else:
+        momentum = (current - prices.iloc[4]) / prices.iloc[4]
 
     def slope_for_window(start: int) -> float:
         """

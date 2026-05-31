@@ -347,7 +347,7 @@ def shutdown_monitor():
 
     try:
         from monitor import shutdown_gracefully, stop_event
-        from monitor_dolar import enviar_mensagem
+        from monitor_base import enviar_mensagem
 
         if stop_event.is_set():
             return jsonify({"ok": True, "message": "Monitor já estava parado"})
@@ -382,7 +382,7 @@ def exit_process():
 
     try:
         from monitor import shutdown_gracefully
-        from monitor_dolar import enviar_mensagem
+        from monitor_base import enviar_mensagem
 
         resumo = _montar_resumo_shutdown()
         enviar_mensagem(resumo)

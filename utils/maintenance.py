@@ -5,9 +5,13 @@ Limpeza de arquivos antigos, rotação de relatórios, etc.
 """
 import json
 import logging
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Tuple
+
+# Adicionar o diretório pai ao path para importar config
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import config
 
