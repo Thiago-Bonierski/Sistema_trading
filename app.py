@@ -8,6 +8,7 @@ Fornece endpoints para visualizar:
 - Histórico de trades
 """
 import threading
+import hmac
 import os
 from typing import Dict, List, Any, Optional
 import logging
@@ -18,6 +19,17 @@ import pandas as pd
 import config
 from database import db_manager, init_database
 from logging_config import setup_logging
+from monitor import (
+    loop_monitoramento,
+    stop_event,
+    training_loop,
+    get_state_snapshot,
+    kpi_tracker,
+    position_manager,
+    equity_manager,
+    risk_controller,
+)
+from ml_training import MLTrainer
 
 # Configurar logging
 logger = setup_logging("flask_app", config.LOG_LEVEL)
@@ -296,26 +308,46 @@ def health():
 
 
 def _validar_token_controle():
-    """Valida token simples para ações críticas pelo dashboard."""
-    token_configurado = getattr(config, "CONTROL_TOKEN", "")
+    """Valida token simples para ações críticas pelo dashboard.
 
+    Rejeita tokens vazios, placeholders (ex: "password") e usa comparação
+    em tempo constante (hmac.compare_digest) para evitar timing attack.
+    """
+    token_configurado = getattr(config, "CONTROL_TOKEN", "") or ""
+
+    # Rejeitar se não houver token configurado ou se for um placeholder óbvio
     if not token_configurado:
         return False
+    if token_configurado.strip().lower() in (
+        "password",
+        "123456",
+        "seu_token_aqui",
+        "changeme",
+        "default",
+        "token",
+    ):
+        logger.warning("CONTROL_TOKEN é um placeholder — ação bloqueada por segurança")
+        return False
 
-    token_recebido = request.headers.get("X-Control-Token", "")
+    token_recebido = request.headers.get("X-Control-Token", "") or ""
 
-    return token_recebido == token_configurado
+    # Rejeitar se o token recebido estiver vazio
+    if not token_recebido:
+        return False
+
+    return hmac.compare_digest(token_recebido, token_configurado)
 
 
 def _montar_resumo_shutdown():
     """Monta resumo simples do estado do sistema antes de parar."""
     try:
-        from monitor import kpi_tracker, risk_controller, equity_manager, position_manager
+        from monitor import kpi_tracker, get_state_snapshot
 
         kpis = kpi_tracker.summary()
-        risk = risk_controller.get_risk_status()
-        equity = equity_manager.get_summary()
-        open_positions = list(position_manager.positions.keys())
+        snapshot = get_state_snapshot()
+        risk = snapshot["risk"]
+        equity = snapshot["equity"]
+        open_positions = list(snapshot["positions"].keys())
 
         resumo = (
             "🛑 SISTEMA ENCERRADO PELO DASHBOARD\n\n"
@@ -437,15 +469,30 @@ if __name__ == '__main__':
         logger.info("Inicializando banco de dados...")
         init_database()
         
-        # Importar monitor apenas quando necessário
-        from monitor import loop_monitoramento
+        # Restaurar estado vivo (posições, equity, risco) no boot
+        try:
+            from monitor import restore_state
+            restore_state()
+        except Exception as e:
+            logger.warning(f"Não foi possível restaurar estado no boot: {e}")
+        
+        # Iniciar thread de treinamento ML (junto com o monitor)
+        logger.info("Iniciando thread de treinamento ML...")
+        trainer = MLTrainer()
+        ml_thread = threading.Thread(
+            target=training_loop,
+            args=(trainer, kpi_tracker),
+            daemon=True,
+            name="MLTrainingThread",
+        )
+        ml_thread.start()
         
         # Iniciar monitor em thread separada
         logger.info("Iniciando thread de monitoramento...")
         monitor_thread = threading.Thread(
             target=loop_monitoramento,
             daemon=True,
-            name="MonitorThread"
+            name="MonitorThread",
         )
         monitor_thread.start()
         

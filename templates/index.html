@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dashboard Multimoedas</title>
+  <title>Dashboard Multimoedas — Sistema de Trading</title>
 
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
@@ -30,6 +30,68 @@
       </button>
     </div>
   </header>
+
+  <!-- RESUMO POR ATIVO -->
+  <section class="summary-grid">
+    <article class="summary-card">
+      <h3>USD/BRL</h3>
+      <p class="big" id="sum-usd-preco">---</p>
+      <p class="tag" id="sum-usd-rec">AGUARDANDO</p>
+      <p class="small">Regime: <span id="sum-usd-regime">—</span> |
+         Engine: <span id="sum-usd-engine">—</span> |
+         Conf: <span id="sum-usd-conf">—</span></p>
+    </article>
+
+    <article class="summary-card">
+      <h3>BTC/BRL</h3>
+      <p class="big" id="sum-btc-preco">---</p>
+      <p class="tag" id="sum-btc-rec">AGUARDANDO</p>
+      <p class="small">Regime: <span id="sum-btc-regime">—</span> |
+         Engine: <span id="sum-btc-engine">—</span> |
+         Conf: <span id="sum-btc-conf">—</span></p>
+    </article>
+
+    <article class="summary-card">
+      <h3>ETH/BRL</h3>
+      <p class="big" id="sum-eth-preco">---</p>
+      <p class="tag" id="sum-eth-rec">AGUARDANDO</p>
+      <p class="small">Regime: <span id="sum-eth-regime">—</span> |
+         Engine: <span id="sum-eth-engine">—</span> |
+         Conf: <span id="sum-eth-conf">—</span></p>
+    </article>
+
+    <article class="summary-card">
+      <h3>SOL/BRL</h3>
+      <p class="big" id="sum-sol-preco">---</p>
+      <p class="tag" id="sum-sol-rec">AGUARDANDO</p>
+      <p class="small">Regime: <span id="sum-sol-regime">—</span> |
+         Engine: <span id="sum-sol-engine">—</span> |
+         Conf: <span id="sum-sol-conf">—</span></p>
+    </article>
+  </section>
+
+  <!-- KPIs -->
+  <section class="kpi-panel">
+    <h3>KPIs de Performance</h3>
+    <div class="kpi-grid">
+      <div class="kpi-item">
+        <span class="kpi-label">Trades</span>
+        <span class="kpi-value" id="kpi-trades">0</span>
+      </div>
+      <div class="kpi-item">
+        <span class="kpi-label">Win Rate</span>
+        <span class="kpi-value" id="kpi-winrate">0.0%</span>
+      </div>
+      <div class="kpi-item">
+        <span class="kpi-label">PnL Médio</span>
+        <span class="kpi-value" id="kpi-avgpnl">R$ 0,00</span>
+      </div>
+      <div class="kpi-item">
+        <span class="kpi-label">Duração Média</span>
+        <span class="kpi-value" id="kpi-duration">0 ticks</span>
+      </div>
+    </div>
+  </section>
 
   <!-- GRÁFICOS -->
   <section class="dashboard-grid">
@@ -67,5 +129,56 @@
 </div>
 
 <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+<script>
+/* =========================
+   ATUALIZAÇÃO DE RESUMOS E KPIs
+   ========================= */
+function formatMoeda(v) {
+  if (v === '---' || v == null) return '---';
+  return 'R$ ' + Number(v).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function atualizarResumos() {
+  fetch('/dados_atualizados')
+    .then(r => r.json())
+    .then(d => {
+      // Resumos por ativo
+      const resumos = [
+        {key: 'usd', prefix: 'summary_usd'},
+        {key: 'btc', prefix: 'summary_btc'},
+        {key: 'eth', prefix: 'summary_eth'},
+        {key: 'sol', prefix: 'summary_sol'},
+      ];
+      resumos.forEach(({key, prefix}) => {
+        const s = d[prefix] || {};
+        const precoEl = document.getElementById(`sum-${key}-preco`);
+        const recEl = document.getElementById(`sum-${key}-rec`);
+        const regEl = document.getElementById(`sum-${key}-regime`);
+        const engEl = document.getElementById(`sum-${key}-engine`);
+        const confEl = document.getElementById(`sum-${key}-conf`);
+        if (precoEl) precoEl.textContent = s.preco || '---';
+        if (recEl) recEl.textContent = s.recomendacao || 'AGUARDANDO';
+        if (regEl) regEl.textContent = s.regime || '—';
+        if (engEl) engEl.textContent = s.engine || '—';
+        if (confEl) confEl.textContent = s.confidence != null ? s.confidence.toFixed(2) : '—';
+      });
+
+      // KPIs
+      const k = d.kpi || {};
+      document.getElementById('kpi-trades').textContent = k.trade_count ?? 0;
+      document.getElementById('kpi-winrate').textContent =
+        (k.win_rate != null ? (k.win_rate * 100).toFixed(1) : 0) + '%';
+      document.getElementById('kpi-avgpnl').textContent =
+        'R$ ' + (k.avg_pnl != null ? k.avg_pnl.toFixed(2) : 0).toLocaleString('pt-BR');
+      document.getElementById('kpi-duration').textContent =
+        (k.avg_duration != null ? k.avg_duration.toFixed(2) : 0) + ' ticks';
+    })
+    .catch(err => console.error('Erro ao atualizar resumos/KPIs:', err));
+}
+
+// Inicializa e agenda atualização dos resumos/KPIs
+atualizarResumos();
+setInterval(atualizarResumos, 30000);
+</script>
 </body>
 </html>

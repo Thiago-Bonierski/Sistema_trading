@@ -3,8 +3,9 @@ Gerenciamento de equity (capital) do sistema.
 
 Classe unificada usada tanto em produção quanto em simulação.
 """
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
+import threading
 
 import config
 
@@ -16,7 +17,9 @@ class EquityManager:
     Gerencia o capital (equity) do sistema de trading.
     
     Rastreia equity atual, pico histórico, drawdown e retorno total.
-    Thread-safe quando usado corretamente (uma instância por estratégia).
+    Thread-safe: todas as operações de escrita/leitura são protegidas
+    por um RLock interno. O estado pode ser persistido e restaurado
+    via to_state_dict()/load_state_dict().
     """
     
     def __init__(self, initial_capital: float = config.INITIAL_CAPITAL):
@@ -26,6 +29,7 @@ class EquityManager:
         Args:
             initial_capital: Capital inicial em valor absoluto
         """
+        self._lock = threading.RLock()
         self.initial_capital = initial_capital
         self.current_equity = initial_capital
         self.peak_equity = initial_capital
@@ -47,34 +51,35 @@ class EquityManager:
         Args:
             pnl_amount: Valor absoluto de lucro/prejuízo do trade
         """
-        # Atualizar equity
-        self.current_equity += pnl_amount
-        
-        # Registrar no histórico
-        self.equity_history.append(self.current_equity)
-        self.pnl_history.append(pnl_amount)
-        
-        # Atualizar pico
-        if self.current_equity > self.peak_equity:
-            self.peak_equity = self.current_equity
-            logger.debug(f"Novo pico de equity: R$ {self.peak_equity:,.2f}")
-        
-        # Calcular drawdown
-        if self.peak_equity > 0:
-            current_drawdown = (self.peak_equity - self.current_equity) / self.peak_equity
-            self.max_drawdown = max(self.max_drawdown, current_drawdown)
+        with self._lock:
+            # Atualizar equity
+            self.current_equity += pnl_amount
             
-            # Alertar se drawdown significativo
-            if current_drawdown > 0.10:  # > 10%
-                logger.warning(
-                    f"Drawdown significativo: {current_drawdown:.1%} "
-                    f"(max: {self.max_drawdown:.1%})"
-                )
-        
-        logger.debug(
-            f"Equity atualizado: R$ {self.current_equity:,.2f} "
-            f"(PnL: {pnl_amount:+.2f})"
-        )
+            # Registrar no histórico
+            self.equity_history.append(self.current_equity)
+            self.pnl_history.append(pnl_amount)
+            
+            # Atualizar pico
+            if self.current_equity > self.peak_equity:
+                self.peak_equity = self.current_equity
+                logger.debug(f"Novo pico de equity: R$ {self.peak_equity:,.2f}")
+            
+            # Calcular drawdown
+            if self.peak_equity > 0:
+                current_drawdown = (self.peak_equity - self.current_equity) / self.peak_equity
+                self.max_drawdown = max(self.max_drawdown, current_drawdown)
+                
+                # Alertar se drawdown significativo
+                if current_drawdown > 0.10:  # > 10%
+                    logger.warning(
+                        f"Drawdown significativo: {current_drawdown:.1%} "
+                        f"(max: {self.max_drawdown:.1%})"
+                    )
+            
+            logger.debug(
+                f"Equity atualizado: R$ {self.current_equity:,.2f} "
+                f"(PnL: {pnl_amount:+.2f})"
+            )
     
     def get_max_equity_drawdown(self) -> float:
         """
@@ -83,7 +88,8 @@ class EquityManager:
         Returns:
             Drawdown máximo como porcentagem (0.0 a 1.0)
         """
-        return self.max_drawdown
+        with self._lock:
+            return self.max_drawdown
     
     def get_current_drawdown(self) -> float:
         """
@@ -92,9 +98,10 @@ class EquityManager:
         Returns:
             Drawdown atual como porcentagem (0.0 a 1.0)
         """
-        if self.peak_equity > 0:
-            return (self.peak_equity - self.current_equity) / self.peak_equity
-        return 0.0
+        with self._lock:
+            if self.peak_equity > 0:
+                return (self.peak_equity - self.current_equity) / self.peak_equity
+            return 0.0
     
     def get_total_return(self) -> float:
         """
@@ -103,9 +110,10 @@ class EquityManager:
         Returns:
             Retorno como porcentagem (0.0 = 0%, 1.0 = 100%, etc)
         """
-        if self.initial_capital > 0:
-            return (self.current_equity - self.initial_capital) / self.initial_capital
-        return 0.0
+        with self._lock:
+            if self.initial_capital > 0:
+                return (self.current_equity - self.initial_capital) / self.initial_capital
+            return 0.0
     
     def get_total_pnl(self) -> float:
         """
@@ -114,7 +122,8 @@ class EquityManager:
         Returns:
             Valor absoluto de lucro/prejuízo
         """
-        return self.current_equity - self.initial_capital
+        with self._lock:
+            return self.current_equity - self.initial_capital
     
     def reset(self, new_capital: Optional[float] = None) -> None:
         """
@@ -123,16 +132,17 @@ class EquityManager:
         Args:
             new_capital: Novo capital inicial (usa original se None)
         """
-        capital = new_capital if new_capital is not None else self.initial_capital
-        
-        self.initial_capital = capital
-        self.current_equity = capital
-        self.peak_equity = capital
-        self.max_drawdown = 0.0
-        self.equity_history = [capital]
-        self.pnl_history = []
-        
-        logger.info(f"Equity resetado para R$ {capital:,.2f}")
+        with self._lock:
+            capital = new_capital if new_capital is not None else self.initial_capital
+            
+            self.initial_capital = capital
+            self.current_equity = capital
+            self.peak_equity = capital
+            self.max_drawdown = 0.0
+            self.equity_history = [capital]
+            self.pnl_history = []
+            
+            logger.info(f"Equity resetado para R$ {capital:,.2f}")
     
     def get_summary(self) -> dict:
         """
@@ -141,16 +151,57 @@ class EquityManager:
         Returns:
             Dicionário com métricas principais
         """
-        return {
-            "initial_capital": self.initial_capital,
-            "current_equity": self.current_equity,
-            "peak_equity": self.peak_equity,
-            "total_return_pct": self.get_total_return() * 100,
-            "total_pnl": self.get_total_pnl(),
-            "current_drawdown_pct": self.get_current_drawdown() * 100,
-            "max_drawdown_pct": self.max_drawdown * 100,
-            "trade_count": len(self.pnl_history),
-        }
+        with self._lock:
+            return {
+                "initial_capital": self.initial_capital,
+                "current_equity": self.current_equity,
+                "peak_equity": self.peak_equity,
+                "total_return_pct": self.get_total_return() * 100,
+                "total_pnl": self.get_total_pnl(),
+                "current_drawdown_pct": self.get_current_drawdown() * 100,
+                "max_drawdown_pct": self.max_drawdown * 100,
+                "trade_count": len(self.pnl_history),
+            }
+    
+    # ------------------------------------------------------------------
+    # PERSISTÊNCIA (contrato de estado único)
+    # ------------------------------------------------------------------
+    
+    def to_state_dict(self) -> Dict[str, Any]:
+        """
+        Serializa o estado do equity para persistência.
+        
+        Returns:
+            Dict com o estado completo
+        """
+        with self._lock:
+            return {
+                "initial_capital": self.initial_capital,
+                "current_equity": self.current_equity,
+                "peak_equity": self.peak_equity,
+                "max_drawdown": self.max_drawdown,
+                "equity_history": list(self.equity_history),
+                "pnl_history": list(self.pnl_history),
+            }
+    
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """
+        Restaura o estado do equity a partir de um dict persistido.
+        
+        Args:
+            state: Dict produzido por to_state_dict()
+        """
+        with self._lock:
+            self.initial_capital = float(state["initial_capital"])
+            self.current_equity = float(state["current_equity"])
+            self.peak_equity = float(state["peak_equity"])
+            self.max_drawdown = float(state.get("max_drawdown", 0.0))
+            self.equity_history = list(state.get("equity_history") or [self.initial_capital])
+            self.pnl_history = list(state.get("pnl_history") or [])
+            logger.info(
+                f"EquityManager restaurado: equity=R$ {self.current_equity:,.2f}, "
+                f"max_dd={self.max_drawdown:.1%}"
+            )
     
     def __repr__(self) -> str:
         """Representação string do equity manager."""

@@ -5,13 +5,24 @@ Gerencia limites de exposição, drawdown, kill-switch e agressividade.
 """
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Dict, DefaultDict, Optional
+from typing import Dict, DefaultDict, Optional, Any
+from functools import wraps
 import logging
+import threading
 
 import config
 from logging_config import log_risk_event
 
 logger = logging.getLogger(__name__)
+
+
+def _locked(method):
+    """Decorador que executa o método sob o RLock do controlador."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 class RiskController:
@@ -36,6 +47,8 @@ class RiskController:
     
     def __init__(self):
         """Inicializa o controlador de risco com valores padrão."""
+        # Lock reentrante para operações atômicas de estado
+        self._lock = threading.RLock()
         
         # Cooldown por símbolo (ticks)
         self.cooldown: DefaultDict[str, int] = defaultdict(int)
@@ -88,6 +101,7 @@ class RiskController:
             f"daily_loss_limit={self.daily_loss_limit:.1%}"
         )
     
+    @_locked
     def update_drawdown(
         self,
         equity_drawdown: float,
@@ -203,6 +217,7 @@ class RiskController:
                     {"new_highs": self.min_new_highs_for_reactivation}
                 )
     
+    @_locked
     def _check_daily_loss_killswitch(self, current_equity: float) -> None:
         """
         Verifica se deve ativar kill-switch por perda diária.
@@ -237,6 +252,7 @@ class RiskController:
                 }
             )
     
+    @_locked
     def _deactivate_killswitch(self) -> None:
         """Desativa kill-switch após expiração."""
         logger.info("🟢 Kill-switch expirado, reativando trading")
@@ -245,6 +261,7 @@ class RiskController:
         # Reduzir contador global como recompensa
         self.global_trade_count = max(0, self.global_trade_count - 2)
     
+    @_locked
     def reset_regime_counts(self, old_regime: str) -> None:
         """
         Reseta contadores quando regime muda.
@@ -259,6 +276,7 @@ class RiskController:
             self.trade_count_by_regime[old_regime] = 0
             logger.info(f"🔄 Resetado contador de {old_regime}: {old_count} → 0")
     
+    @_locked
     def _reset_trade_counts_if_needed(self, current_equity: float) -> None:
         """
         Reseta contadores de trade quando necessário.
@@ -300,6 +318,7 @@ class RiskController:
                     f"{old_count} → {self.global_trade_count}"
                 )
     
+    @_locked
     def _derive_regime_limits(self, level: str) -> Dict[str, int]:
         """
         Deriva limites de trades por regime baseado no nível.
@@ -312,6 +331,7 @@ class RiskController:
         """
         return config.get_regime_limits(level)
     
+    @_locked
     def can_trade(
         self,
         action: str = "COMPRA",
@@ -379,6 +399,7 @@ class RiskController:
         
         return True
     
+    @_locked
     def _record_blocked_trade(self, regime: str, reason: Optional[str] = None) -> None:
         """
         Registra trade bloqueado nas métricas.
@@ -395,6 +416,7 @@ class RiskController:
             self.blocked_trades_by_reason[reason] += 1
             logger.debug(f"Trade bloqueado: {reason} (regime: {regime})")
     
+    @_locked
     def register_trade(self, symbol: str, regime: str, action: str) -> None:
         """
         Registra trade executado e atualiza contadores.
@@ -425,6 +447,7 @@ class RiskController:
             f"{self.max_trades_by_regime.get(regime, 0)})"
         )
     
+    @_locked
     def close_position(self, symbol: str) -> None:
         """
         Registra fechamento de posição.
@@ -440,12 +463,14 @@ class RiskController:
                 f"(posições abertas: {self.total_open_positions})"
             )
     
+    @_locked
     def tick(self) -> None:
         """Atualiza estado por tick (decrementa cooldowns)."""
         for symbol in list(self.cooldown.keys()):
             if self.cooldown[symbol] > 0:
                 self.cooldown[symbol] -= 1
     
+    @_locked
     def can_execute(
         self,
         symbol: str,
@@ -530,6 +555,7 @@ class RiskController:
         
         return can_trade
     
+    @_locked
     def get_risk_status(self) -> Dict[str, any]:
         """
         Retorna status completo de risco.
@@ -559,3 +585,83 @@ class RiskController:
             "can_trade": self.can_trade(),
             "new_high_counter": self.new_high_counter,
         }
+    
+    # ------------------------------------------------------------------
+    # PERSISTÊNCIA (contrato de estado único)
+    # ------------------------------------------------------------------
+    
+    def to_state_dict(self) -> Dict[str, Any]:
+        """
+        Serializa o estado do risco para persistência.
+        
+        Returns:
+            Dict com o estado completo
+        """
+        with self._lock:
+            return {
+                "aggressiveness_level": self.aggressiveness_level,
+                "global_trade_count": self.global_trade_count,
+                "trade_count_by_regime": dict(self.trade_count_by_regime),
+                "cooldown": dict(self.cooldown),
+                "blocked_trades": self.blocked_trades,
+                "new_high_counter": self.new_high_counter,
+                "last_reset_day": (
+                    self.last_reset_day.isoformat() if self.last_reset_day else None
+                ),
+                "last_equity_high": self.last_equity_high,
+                "daily_start_equity": self.daily_start_equity,
+                "kill_switch_activated": self.kill_switch_activated,
+                "kill_switch_until": (
+                    self.kill_switch_until.isoformat() if self.kill_switch_until else None
+                ),
+            }
+    
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """
+        Restaura o estado do risco a partir de um dict persistido.
+        
+        Args:
+            state: Dict produzido por to_state_dict()
+        """
+        with self._lock:
+            self.aggressiveness_level = state.get("aggressiveness_level", "NORMAL")
+            self.global_trade_count = int(state.get("global_trade_count", 0))
+            self.trade_count_by_regime = defaultdict(
+                int, state.get("trade_count_by_regime") or {}
+            )
+            self.cooldown = defaultdict(int, state.get("cooldown") or {})
+            self.blocked_trades = int(state.get("blocked_trades", 0))
+            self.new_high_counter = int(state.get("new_high_counter", 0))
+            
+            last_reset_day = state.get("last_reset_day")
+            if last_reset_day:
+                try:
+                    self.last_reset_day = datetime.fromisoformat(last_reset_day).date()
+                except ValueError:
+                    self.last_reset_day = datetime.now().date()
+            else:
+                self.last_reset_day = datetime.now().date()
+            
+            self.last_equity_high = float(state.get("last_equity_high") or 0.0)
+            self.daily_start_equity = state.get("daily_start_equity")
+            self.kill_switch_activated = bool(state.get("kill_switch_activated"))
+            
+            kill_switch_until = state.get("kill_switch_until")
+            if kill_switch_until:
+                try:
+                    self.kill_switch_until = datetime.fromisoformat(kill_switch_until)
+                except ValueError:
+                    self.kill_switch_until = None
+            else:
+                self.kill_switch_until = None
+            
+            # Recalcula limites derivados do nível restaurado
+            self.max_trades_by_regime = self._derive_regime_limits(
+                self.aggressiveness_level
+            )
+            
+            logger.info(
+                f"RiskController restaurado: nível={self.aggressiveness_level}, "
+                f"trades={self.global_trade_count}, "
+                f"kill_switch={self.kill_switch_activated}"
+            )

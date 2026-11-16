@@ -75,7 +75,6 @@ class KPITracker:
         engine: str,
         action: str,
         confidence: float,
-        exhausted: bool = False
     ) -> None:
         """
         Registra sinal gerado por uma engine.

@@ -1,0 +1,130 @@
+=================================================================
+DESCRIÇÃO DO SISTEMA DE SIMULAÇÃO (simular.py)
+=================================================================
+
+Objetivo
+---------
+Executar simulações de trading usando EXATAMENTE os mesmos componentes
+de produção (engines, filtros, PositionManager, RiskController, EquityManager
+e MLClassifier), garantindo que os resultados sejam comparáveis ao sistema
+real rodando ao vivo. Não há mock_strategy_signal nem dados artificiais.
+
+=================================================================
+COMO EXECUTAR
+=================================================================
+
+    source venv/bin/activate && python simular.py
+
+=================================================================
+MODOS DISPONÍVEIS
+=================================================================
+
+1. RESEARCH (Modo Agressivo)
+   - Até 5 posições simultâneas
+   - Nível de agressividade NORMAL
+   - Menor restrição de drawdown
+
+2. PAPER_TRADING (Modo Conservador)
+   - Máximo 1 posição simultânea
+   - Agressividade REDUCIDA
+   - Limite de drawdown a 25%
+
+Ambos os modos recebem seed=42 por padrão, garantindo reprodutibilidade.
+
+=================================================================
+SAÍDA NA TELA (RESUMO)
+=================================================================
+
+Ao final da simulação (10.000 ticks por padrão), imprime:
+
+  RESUMO DA SIMULAÇÃO (componentes reais)
+
+  📊 RESEARCH MODE (seed=42):
+    • Trades: 1
+    • Win Rate: 0.0%
+    • Max DD: 0.2%
+    • Return: -0.2%
+
+  📊 PAPER TRADING MODE (seed=42):
+    • Trades: 1
+    • Win Rate: 0.0%
+    • Max DD: 0.2%
+    • Return: -0.2%
+
+  📉 Trade Reduction: 0.0%
+
+=================================================================
+O QUE É SALVO
+=================================================================
+
+Após a execução, um relatório JSON é gravado em:
+  simulation_reports/dual_mode_report_YYYYMMDD_HHMMSS.json
+
+Estrutura do relatório:
+
+{
+  "timestamp": "2026-11-15T21:20:09.123456",
+  "research": { modo research completo },
+  "paper_trading": { modo paper trading completo },
+  "comparison": {
+    "trade_reduction_pct": (redução percentual de trades),
+    "equity_preservation_pct": (preservação de equity relativa),
+    "risk_control_passed": (se max_drawdown < 25%)
+  }
+}
+
+=================================================================
+CARACTERÍSTICAS PRINCIPAIS
+=================================================================
+
+1. SEED FIXO (42): Resultados idênticos a cada execução com o mesmo seed.
+   Mude o SEED no código se quiser variância estatística.
+
+2. COMPONENTES REAIS: As engines (TrendFollowing, MeanReversion,
+   BreakoutMomentum), filtros (exaustão, confirmação de tendência),
+   PositionManager, RiskController e EquityManager são os mesmos
+   do dashboard/Flask. O que bloqueia no simulador, bloquearia na
+   produção real.
+
+3. NENHUM MOCK: O sinal vem da StrategyOrchestrator sobre preços
+   sintéticos (SyntheticMarket), mas as regras de decisão são idênticas
+   à produção.
+
+4. ML CLASSIFIER: Se um modelo for treinado (via MLTrainingThread),
+   ele também filtra sinais na simulação.
+
+5. REPRODUZÍVEL: Mismo seed + mesmos ticks = mesmos resultados.
+   Útil para comparar configurações (ex: max_positions=3 vs 5).
+
+=================================================================
+POR QUE WIN RATE PODE SER 0% (seed=42)
+=================================================================
+
+Com 10.000 ticks e seed=42, o mercado sintético pode não gerar
+oportunidades que passem por todos os filtros simultâneos (confirmação
+de tendência + exaustão + ML). Isso é normal. Aumente o número de ticks
+ou rode múltiplas execuções para estatísticas mais robustas.
+
+=================================================================
+PARA RODAR SOMENTE UM MODO
+=================================================================
+
+Comente a chamada do modo que não deseja no bloco `if __name__ == '__main__'`
+ou ajuste config.SIMULATION_TICKS/config.INITIAL_CAPITAL no config.py antes
+de rodar.
+
+=================================================================
+ENDPOINT DE DADOS (enquanto o app roda)
+=================================================================
+
+Com o app.py rodando em http://127.0.0.1:5000, a simulação pode
+consultar http://127.0.0.1:5000/dados_atualizados para ver o estado
+atual do sistema (cotações, KPIs, recomendações).
+
+=================================================================
+FINALIDADE
+=================================================================
+
+Validar que a simulação produz resultados consistentes com a produção,
+testar configurações de risco sem afetar o capital real e gerar relatórios
+comparativos entre modos agressivo e conservador.

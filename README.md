@@ -251,7 +251,7 @@ Sistema_trading/
 
 **Prerequisito**: Python 3.8 ou superior.
 
-**Instalacao rapida com script:**
+**Instalacao rapida com script (recomendado):**
 
 ```bash
 git clone https://github.com/Thiago-Bonierski/Sistema_trading.git
@@ -259,7 +259,9 @@ cd Sistema_trading
 bash install.sh
 ```
 
-O script cria o ambiente virtual (opcional), instala dependencias, inicializa o banco de dados SQLite e configura o `.env` a partir do `.env.example`.
+O script cria o ambiente virtual, instala dependencias (incluindo `python-dotenv`),
+inicializa o banco de dados SQLite com as tabelas de estado vivo, cria o `.env` a
+partir do `.env.example` e executa os testes automatizados.
 
 **Instalacao manual:**
 
@@ -278,6 +280,32 @@ cp .env.example .env
 
 ---
 
+## Arquitetura (Estado Unico e Contratos Rigidos)
+
+O sistema segue uma **Arquitetura Orientada a Estado Unico** com tres garantias:
+
+1. **SQLite como fonte unica de verdade**: posicoes abertas, equity e nivel de risco
+   sao persistidos em tabelas `positions`, `system_state` e `risk_state`. No boot,
+   o `restore_state()` recupera automaticamente o estado, sobrevivendo a
+   reinicializacoes.
+
+2. **Contrato unico de features ML**: o modulo `features.py` define as 8 colunas
+   usadas tanto no treino (`ml_training.py`) quanto na inferencia
+   (`ml_classifier.py`), eliminando desalinhamentos e data leakage
+   (`duration_ticks` foi removido).
+
+3. **Simulacao idêntica à producao**: `simular.py` usa exatamente as mesmas
+   engines (`TrendFollowing`, `MeanReversion`, `BreakoutMomentum`),
+   filtros (confirmacao de tendencia, exaustao, ML) e o `PositionManager`
+   oficial da producao, com seed reproduzivel.
+
+**Thread-safety real**: um `state_lock` (`threading.RLock`) protege o estado vivo
+contra leitura concorrente do Flask e escrita do monitor. O Flask le um
+snapshot imutavel via `get_state_snapshot()`, evitando `RuntimeError` por
+dicionario mutado durante iteracao.
+
+---
+
 ## Configuracao
 
 Copie `.env.example` para `.env` e preencha as variaveis necessarias:
@@ -292,32 +320,41 @@ FLASK_HOST=127.0.0.1
 FLASK_PORT=5000
 FLASK_DEBUG=False
 
-# Token de controle remoto do dashboard
+# Token de controle remoto do dashboard (use uma senha forte, nao deixe o placeholder)
 CONTROL_TOKEN=escolha_um_token_seguro
 
 # Logging
 LOG_LEVEL=INFO
 ```
 
-Todos os parametros operacionais (stop-loss, take-profit, thresholds de regime, limites de risco, intervalo de monitoramento, etc.) sao configurados diretamente em `config.py` com documentacao inline.
+Obs.: `TELEGRAM_TOKEN` e `CHAT_ID` podem ficar vazios; o sistema desabilita o
+Telegram silenciosamente. `CONTROL_TOKEN` nao deve ser o placeholder "password".
+
+Todos os parametros operacionais (stop-loss, take-profit, thresholds de regime,
+limites de risco, intervalo de monitoramento, etc.) sao configurados diretamente
+em `config.py` com documentacao inline.
 
 ---
 
 ## Uso
 
-**Iniciar o sistema completo (monitor + dashboard):**
+**Iniciar o sistema completo (monitor + ML training + dashboard):**
 
 ```bash
 python app.py
 ```
 
-O monitor inicia em thread separada e o dashboard fica acessivel em `http://127.0.0.1:5000`.
+O monitor, a thread de treinamento ML e o Flask iniciam juntos. O dashboard fica
+acessivel em `http://127.0.0.1:5000`.
 
-**Executar simulacao:**
+**Executar simulacao (componentes reais de producao):**
 
 ```bash
 python simular.py
 ```
+
+A simulação roda as mesmas engines, filtros e regras de posicao da producao,
+com seed reproduzivel.
 
 **Executar demonstracao dos modulos:**
 
@@ -334,19 +371,94 @@ pytest tests/ --cov=. --cov-report=term-missing
 
 ---
 
+## Estrutura do Projeto
+
+```
+Sistema_trading/
+|
+|-- app.py                  # API Flask + orquestra Monitor + MLTraining + Flask
+|-- config.py               # Todas as configuracoes e constantes
+|-- database.py             # DatabaseManager thread-safe + persistência estado vivo
+|-- equity.py               # EquityManager (capital, drawdown, retorno) com RLock
+|-- exhaustion_filter.py    # Filtro de exaustao de movimento (ativo na producao)
+|-- features.py             # CONTRATO UNICO de features ML (treino + inferencia)
+|-- kpis.py                 # KPITracker (metricas de performance)
+|-- logging_config.py       # Logging com rotacao, niveis e funcoes estruturadas
+|-- market_regime.py        # Deteccao de regime de mercado
+|-- ml_classifier.py        # Filtro ML de sinais (recarregamento automatico)
+|-- ml_training.py          # Treinamento periodico (split temporal, RF, gravacao atomica)
+|-- monitor.py              # Loop principal + restore_state/persist_state/snapshot
+|-- monitor_base.py         # Cliente de API e Telegram
+|-- position_manager.py     # Ciclo de vida de posicoes (RLock + serializacao)
+|-- risk_control.py         # RiskController com kill-switch (RLock + serializacao)
+|-- simular.py              # Simulacao com componentes reais de producao
+|-- strategy_unified.py     # Engines + Orquestrador de estrategias
+|-- demo.py                 # Script de demonstracao dos modulos
+|-- requirements.txt
+|-- install.sh
+|
+|-- templates/
+|   |-- index.html          # Dashboard com resumos por ativo + KPIs
+|
+|-- static/
+|   |-- dashboard.js        # Logica de graficos e atualizacao (safe p/ length < 2)
+|   |-- style.css           # Estilo do dashboard
+|
+|-- tests/
+|   |-- test_equity.py
+|   |-- test_market_regime.py
+|   |-- test_persistence.py     # Persistencia e restauracao de estado
+|   |-- test_ml_pipeline.py     # ML fim-a-fim (contrato unico, sem leakage)
+|   |-- test_filters.py         # Filtros (exaustao, confirmacao de tendencia)
+|   |-- test_concurrency.py     # Thread-safety e state_lock
+|
+|-- utils/
+|   |-- maintenance.py      # Limpeza e rotacao de arquivos
+```
+
+---
+
 ## Decisoes de Design
 
-**Thread safety no SQLite**: SQLite nao suporta multiplas conexoes simultaneas com seguranca. O `DatabaseManager` resolve isso com um `threading.Lock` global e context manager que garante atomicidade de cada operacao, sem depender de ORMs.
+**Estado unico e persistido**: SQLite guarda posicoes, equity e risco. O sistema
+restaura o estado no boot, evitando perda de posicoes abertas e equity em
+reinicializacoes.
 
-**Fallback de ML sem dependencia**: O `MLClassifier` opera com heuristica propria quando `scikit-learn` ou `joblib` nao estao instalados. O sistema nunca para por ausencia de dependencias opcionais.
+**Thread-safety no SQLite + estado vivo**: `DatabaseManager` usa um
+`threading.Lock` global para SQLite. O `state_lock` (`threading.RLock`) protege
+o estado vivo compartilhado entre monitor e Flask.
 
-**Configuracao centralizada**: Todos os magic numbers estao em `config.py`. Nenhum threshold de estrategia, parametro de risco ou configuracao de API esta embutido no codigo das classes.
+**Contrato unico de features ML**: `features.py` e a unica fonte de definicao
+de features (8 colunas, sem `duration_ticks` — data leakage removido). Treino e
+inferencia usam as mesmas colunas, ordem e transformacoes.
 
-**Protecao por data gap**: Posicoes abertas sao encerradas automaticamente se mais de 10 minutos se passarem sem dados validos. Isso evita que o sistema fique "cego" com posicoes ativas durante quedas de API ou rede.
+**Fallback de ML sem dependencia**: O `MLClassifier` opera com heuristica
+quando `scikit-learn` ou `joblib` nao estao instalados. Erros de predicao
+reais nao são silenciados (levantam `RuntimeError`).
 
-**Separacao entre simulacao e producao**: O modulo `simular.py` tem seu proprio `PositionManager` e `EquityManager` desacoplados das instancias de producao em `monitor.py`. Nao ha estado compartilhado entre os dois modos.
+**Gravacao atomica do modelo**: o pipeline salvo usa `.tmp` + `os.replace` para
+evitar leitura de arquivo truncado. O `MLClassifier` recarrega automaticamente
+quando o arquivo do modelo muda (hot-reload apos treino).
 
-**Shutdown gracioso**: O controle de `stop_event` (threading.Event) permite encerrar o loop de monitoramento sem matar o processo Flask, mantendo o dashboard disponivel para auditoria pos-shutdown.
+**Configuracao centralizada**: Todos os magic numbers estao em `config.py`.
+
+**Protecao por data gap**: Posicoes abertas sao encerradas automaticamente se mais
+de 10 minutos se passarem sem dados validos.
+
+**Simulacao = producao**: `simular.py` nao usa mais `mock_strategy_signal`;
+roda as engines reais e filtros reais do sistema de producao.
+
+**Shutdown gracioso**: O controle de `stop_event` (threading.Event) permite
+encerrar o loop de monitoramento sem matar o processo Flask.
+
+---
+
+## Seguranca
+
+- `/api/shutdown_monitor` e `/api/exit_process` exigem `CONTROL_TOKEN` valido,
+  comparado com `hmac.compare_digest` (tempo constante).
+- Tokens vazios ou placeholders (ex: "password") sao rejeitados.
+- O dashboard e acessível apenas em `127.0.0.1:5000` por padrão.
 
 ---
 

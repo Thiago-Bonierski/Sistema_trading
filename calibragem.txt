@@ -1,0 +1,177 @@
+================================================================================
+AUDITORIA QUANTITATIVA DE CALIBRAGEM — SISTEMA DE TRADING
+================================================================================
+Analise dos parâmetros numéricos e thresholds definidos em:
+- config.py
+- market_regime.py
+- strategy_unified.py
+- exhaustion_filter.py
+- risk_control.py
+- position_manager.py
+
+Data: 15/11/2026
+Status: Aguardando aprovacao antes de editar config.py
+
+================================================================================
+1. COERENCIA DE TIMEFRAME vs. ALVOS (Stop-Loss / Take-Profit / Aging)
+================================================================================
+
+Parametros Relevantes:
+  - MONITORING_INTERVAL_SECONDS = 20s   (intervalo entre ticks)
+  - DEFAULT_STOP_LOSS_PCT          = 0.025 (2,5%)
+  - DEFAULT_TAKE_PROFIT_PCT        = 0.050 (5,0%)
+  - MAX_POSITION_AGE_TICKS["NORMAL"]  = 50 ticks  (~16,7 min)
+  - MAX_POSITION_AGE_TICKS["REDUCED"] = 25 ticks  (~8,3 min)
+  - MAX_POSITION_AGE_TICKS["PROTECT"] = 15 ticks  (5,0 min)
+
+Calculo de Plausibilidade Matematica:
+
+| Ativo   | Volatilidade horaria tipica | Movimento por tick (20s) | Movimento em 50 ticks (16,7 min) | Atinge 2,5% em 50 ticks? | Atinge 5,0% em 50 ticks? |
+|---------|----------------------------|--------------------------|----------------------------------|--------------------------|--------------------------|
+| USD/BRL | ~0,20% - 0,30%            | ~0,001% - 0,002%         | ~0,05% - 0,10%                  | NAO (25x-50x abaixo)     | NAO (50x-100x abaixo)    |
+| BTC/BRL | ~0,80% - 1,50%            | ~0,004% - 0,008%         | ~0,20% - 0,40%                  | NAO (6x-12x abaixo)      | NAO (12x-25x abaixo)     |
+| SOL/BRL | ~1,50% - 3,00%            | ~0,008% - 0,017%         | ~0,40% - 0,85%                  | NAO (3x-6x abaixo)       | NAO (6x-12x abaixo)      |
+| ETH/BRL | ~1,00% - 2,00%            | ~0,006% - 0,011%         | ~0,30% - 0,60%                  | NAO (4x-8x abaixo)       | NAO (8x-16x abaixo)      |
+
+Diagnostico:
+  POSICOES MEREM QUASE SEMPRE POR MAX_AGE OU REGIME_CHANGE, NUNCA POR STOP/TAKE-PROFIT.
+
+  - Para USD/BRL, o stop-loss de 2,5% e 25x maior que o movimento esperado em 16,7 minutos.
+    A posicao nunca sera fechada por stop.
+  - Mesmo para SOL/BRL (a mais volátil), o stop de 2,5% esta 3x-6x acima do movimento esperado
+    na janela de aging.
+
+Impacto: O sistema acumula posicoes "zumbi" que sao encerradas por idade (MAX_AGE) com PnL
+proximo de zero ou ligeiramente negativo, sem jamais capturar o upside do take-profit de 5%.
+O stop-loss e inócuo para moedas fiduciarias e marginalmente util apenas para cripto em
+momentos extremos.
+
+================================================================================
+2. THRESHOLDS DE DETECCAO DE REGIME E EXAUSTAO
+================================================================================
+
+A) market_regime.py — Thresholds Globais (mesmo valor para todos os ativos)
+
+| Parametro         | Valor       | USD/BRL (baixa vol) | SOL/BRL (alta vol) | Diagnostico              |
+|-------------------|-------------|---------------------|--------------------|--------------------------|
+| RANGE_THRESHOLD   | 0,004 (0,4%)| NAO (muito alto)    | OK                 | Ruido para fiduciaria    |
+| SLOPE_THRESHOLD_SMALL | 0,0015 (0,15%) | Borderline      | OK                 | OK                       |
+| SLOPE_THRESHOLD_MEDIUM| 0,0025 (0,25%)| NAO (muito alto)| OK                 | Tende a classificar TRANSICAO |
+| SLOPE_THRESHOLD_LARGE | 0,003 (0,3%)| NAO (quase nunca) | Possivel           | Fiduciaria nunca entra TENDENCIA |
+| CHAOS_RANGE_THRESHOLD | 0,006 (0,6%)| NAO (nunca)      | Sempre             | Fiduciaria nunca entra ALTA_VOL |
+| CHAOS_MOMENTUM_THRESHOLD | 0,015 (1,5%)| NAO em 5 ticks | Possivel           | Fiduciaria nunca exausta por momentum |
+| VOLATILITY_RATIO_THRESHOLD | 1,2 | OK              | OK                 | Aceitavel                |
+
+Problema critico: Os thresholds sao GLOBAIS para todos os ativos. USD/BRL raramente atinge
+SLOPE_THRESHOLD_LARGE (0,3% em 30 ticks = 10 minutos), entao fica preso em TRANSICAO ou
+CONSOLIDACAO. SOL/BRL facilmente excede CHAOS_RANGE_THRESHOLD (0,6%) e entra em
+ALTA_VOLATILIDADE, que bloqueia entradas (ProtectFlat apenas).
+
+B) exhaustion_filter.py — Critérios de Exaustao
+
+| Criterio | Condicao                   | USD/BRL      | SOL/BRL      | Diagnostico                     |
+|----------|----------------------------|--------------|--------------|---------------------------------|
+| Criterio 1 | |momentum| > 0,025 (2,5%) E decel > 0,006 | Impossivel em 5 ticks | Possivel em spikes | Nunca ativa para fiduciaria |
+| Criterio 2 | |momentum| < 0,008 (0,8%) E range > 0,0045 | Sempre verdadeiro | Às vezes | Bloqueia tudo para fiduciaria |
+| Criterio 3 | vol_ratio > 2,5 E |momentum| < 0,012 | Raro         | Comum          | Pode bloquear cripto injustamente |
+
+Problema:
+  - Criterio 2: quase sempre verdadeiro para USD/BRL (momentum < 0,8% é o estado normal),
+    mas o range > 0,45% raramente acontece. Quando acontece, bloqueia a entrada.
+  - Criterio 1: exige momentum de 2,5% em 5 ticks — impossível para moedas fiduciarias.
+  - Resultado: O filtro de exaustao bloqueia entradas de forma inconsistente — nunca ativa
+    quando deveria (momentum real desacelerando em cripto) e pode bloquear por range spurio
+    em fiduciarias.
+
+C) strategy_unified.py — Thresholds das Engines
+
+| Parametro                 | Valor       | Impacto USD/BRL     | Impacto Cripto   |
+|---------------------------|-------------|---------------------|------------------|
+| TREND_PRICE_THRESHOLD     | 0,001 (0,1%)| Muito sensível      | OK               |
+| MEAN_REVERSION_BAND_WIDTH | 0,006 (0,6%)| Muito largo — nunca gera sinal | OK |
+| BREAKOUT_THRESHOLD        | 0,003 (0,3%)| Nunca atinge        | Possivel         |
+| BREAKOUT_MIN_RANGE        | 0,003 (0,3%)| Nunca               | Possivel         |
+
+================================================================================
+3. PLANO DE RECALIBRAGEM — PARAMETROS PROBLEMATICOS
+================================================================================
+
+Abaixo, lista de cada parametro com Valor Atual, Por que esta descalibrado e Valor
+Recomendado.
+
+AVISO: AGUARDANDO APROVACAO ANTES DE EDITAR config.py.
+
+3.1. Parametros de Saida (Stop / Take / Aging)
+
+| Parametro                        | Valor Atual | Problema                                           | Valor Recomendado | Justificativa                                             |
+|----------------------------------|-------------|----------------------------------------------------|-------------------|-----------------------------------------------------------|
+| DEFAULT_STOP_LOSS_PCT            | 0,025 (2,5%)| Muito largo para timeframe 20s — nunca atingido USD/BRL | 0,008 (0,8%)   | Alinha com movimento esperado em ~13 min (fiduciaria)      |
+| DEFAULT_TAKE_PROFIT_PCT          | 0,050 (5,0%)| Nunca atingido — posicoes morrem por aging         | 0,015 (1,5%)      | Alcançavel para ambos perfis dentro da janela de aging     |
+| MAX_POSITION_AGE_TICKS["NORMAL"] | 50 ticks    | 16,7 min excessivo para timeframe 20s              | 30 ticks (10 min) | Forca decisao mais rapida, reduz posicoes zumbi            |
+| MAX_POSITION_AGE_TICKS["REDUCED"]| 25 ticks    | 8,3 min ainda largo                                | 15 ticks (5 min)  | Modo conservador deve ser mais rapido                      |
+| MAX_POSITION_AGE_TICKS["PROTECT"]| 15 ticks    | 5 min adequado                                     | 10 ticks (3,3 min)| Saída mais rapida em modo protecao                         |
+
+3.2. Parametros de Detecção de Regime (market_regime.py)
+
+| Parametro                   | Valor Atual | Problema                                       | Valor Recomendado | Justificativa                                             |
+|-----------------------------|-------------|------------------------------------------------|-------------------|-----------------------------------------------------------|
+| RANGE_THRESHOLD             | 0,004 (0,4%)| Muito alto para USD/BRL (baixa vol nunca atinge) | 0,0015 (0,15%)   | Mais sensivel para consolidacao em fiduciarias            |
+| SLOPE_THRESHOLD_SMALL       | 0,0015 (0,15%)| Marginalmente alto                            | 0,0008 (0,08%)   | Permite deteccao de tendencia suave em fiduciarias        |
+| SLOPE_THRESHOLD_MEDIUM      | 0,0025 (0,25%)| Excessivo para fiduciaria                     | 0,0012 (0,12%)   | Equilibrado entre sensibilidade e ruido                   |
+| SLOPE_THRESHOLD_LARGE       | 0,003 (0,3%)| Quase nunca atinge para USD/BRL                | 0,0015 (0,15%)   | Permite classificacao de tendencia clara em fiduciaria    |
+| CHAOS_RANGE_THRESHOLD       | 0,006 (0,6%)| Nunca atinge para fiduciaria                   | 0,003 (0,3%)     | Mais sensivel para detectar caos em fiduciaria            |
+| CHAOS_MOMENTUM_THRESHOLD    | 0,015 (1,5%)| Muito alto para 5 ticks                        | 0,005 (0,5%)     | Mais realista para timeframe de 100s                      |
+
+3.3. Parametros de Exaustao (exhaustion_filter.py)
+
+| Parametro                        | Valor Atual | Problema                                   | Valor Recomendado | Justificativa                                             |
+|----------------------------------|-------------|--------------------------------------------|-------------------|-----------------------------------------------------------|
+| Criterio 1 momentum threshold    | 0,025 (2,5%)| Impossível para fiduciaria                 | 0,008 (0,8%)      | Alcançavel em 5 ticks para ambos perfis                   |
+| Criterio 1 deceleration threshold| 0,006 (0,6%)| Alto                                       | 0,002 (0,2%)      | Detecta desaceleracao mais cedo                           |
+| Criterio 2 momentum threshold    | 0,008 (0,8%)| OK                                         | 0,005 (0,5%)      | Mais sensivel                                             |
+| Criterio 2 range threshold       | 0,0045 (0,45%)| Alto para fiduciaria                    | 0,002 (0,2%)      | Alinha com range_threshold ajustado                       |
+| Criterio 3 vol_ratio threshold   | 2,5         | Alto                                       | 2,0               | Detecta exaustao por vol mais cedo                        |
+| Criterio 3 momentum threshold    | 0,012 (1,2%)| Alto para fiduciaria                       | 0,005 (0,5%)      | Mais realista                                             |
+
+3.4. Parametros das Engines (strategy_unified.py)
+
+| Parametro                  | Valor Atual | Problema                                   | Valor Recomendado | Justificativa                                             |
+|----------------------------|-------------|--------------------------------------------|-------------------|-----------------------------------------------------------|
+| TREND_PRICE_THRESHOLD      | 0,001 (0,1%)| Muito sensível para fiduciaria (ruído)     | 0,002 (0,2%)      | Reduz sinais falsos por micro-ruído                       |
+| MEAN_REVERSION_BAND_WIDTH  | 0,006 (0,6%)| Muito largo — nunca gera sinal             | 0,003 (0,3%)      | Alcançavel para ambos perfis                              |
+| BREAKOUT_THRESHOLD         | 0,003 (0,3%)| Alto para fiduciaria                       | 0,0015 (0,15%)    | Permite deteccao de breakout em fiduciaria                |
+| BREAKOUT_MIN_RANGE         | 0,003 (0,3%)| Alto para fiduciaria                       | 0,0015 (0,15%)    | Mesmo rationale acima                                     |
+
+3.5. Parametros de Risco (risk_control.py / config.py)
+
+| Parametro                   | Valor Atual | Problema                                       | Valor Recomendado | Justificativa                                             |
+|-----------------------------|-------------|------------------------------------------------|-------------------|-----------------------------------------------------------|
+| GLOBAL_TRADE_LIMIT          | 8 trades/dia| Muito restritivo para timeframe 20s            | 25 trades/dia     | Permite mais oportunidades sem comprometer risco          |
+| BASE_POSITION_SIZE_PCT      | 0,10 (10%)  | Alto para posicao unica sem diversificacao     | 0,05 (5%)         | Reduz exposicao por trade, melhora sobrevivencia          |
+| EQUITY_DRAWDOWN_LIMIT       | 0,25 (25%)  | Muito largo — permite perda grande antes parar | 0,15 (15%)        | Limite mais conservador, alinhado com praticas profissionais|
+| DAILY_LOSS_LIMIT            | 0,03 (3%)   | OK                                             | 0,02 (2%)         | Mais conservador, kill-switch mais cedo                   |
+| MIN_CONFIDENCE_FOR_REDUCED  | 0,70        | Alto — bloqueia muitos trades em REDUCED       | 0,60              | Mais flexivel em modo reduzido                            |
+| TREND_CONFIRMATION_TICKS    | 2 ticks (40s)| Muito curto — confirmacao quase instantanea   | 3 ticks (1 min)   | Confirmacao mais robusta                                |
+
+================================================================================
+RESUMO DOS PROBLEMAS CRITICOS
+================================================================================
+
+1. Stop-loss de 2,5% e inócuo para USD/BRL — posicoes nunca saem por stop,
+   so por aging/regime.
+
+2. Take-profit de 5,0% e inalcançavel — posicoes morrem por MAX_AGE antes
+   de atingir.
+
+3. Thresholds de regime globais tornam USD/BRL "cega" (nunca detecta
+   tendencia) e SOL/BRL "paranoica" (sempre em ALTA_VOLATILIDADE).
+
+4. Filtro de exaustao Criterio 1 exige momentum de 2,5% em 100s — impossível
+   para fiduciarias.
+
+5. Position sizing de 10% e agressivo demais para um sistema sem
+   diversificacao por ativo.
+
+================================================================================
+STATUS: Aguardando aprovacao dos novos valores antes de editar config.py.
+================================================================================

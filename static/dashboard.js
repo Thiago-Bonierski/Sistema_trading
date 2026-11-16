@@ -51,7 +51,8 @@ function renderChart(containerId, series, baseColor) {
 
   const lastIndex = data.length - 1;
   const last = data[lastIndex];
-  const prev = data[lastIndex - 1];
+  // prev só existe quando há pelo menos 2 pontos
+  const prev = data.length > 1 ? data[lastIndex - 1] : last;
 
   const delta = last.preco - prev.preco;
   const directionColor = delta >= 0

@@ -52,17 +52,18 @@ DB_MAX_RETRIES = 3
 # TRADING PARAMETERS
 # ============================================================================
 
-# Position Management
-DEFAULT_STOP_LOSS_PCT = 0.025  # 2.5% max loss per trade
-DEFAULT_TAKE_PROFIT_PCT = 0.05  # 5% profit target
+# Position Management — Valores base para fiduciárias (USD/BRL)
+# Criptoativos aplicam multiplicador de volatilidade (ver market_regime.py e strategy_unified.py)
+DEFAULT_STOP_LOSS_PCT = 0.008  # 0.8% max loss per trade (base fiduciária)
+DEFAULT_TAKE_PROFIT_PCT = 0.015  # 1.5% profit target (base fiduciária)
 MAX_POSITION_AGE_TICKS = {
-    "NORMAL": 50,      # Mais tempo para winners
-    "REDUCED": 25,     # Médio
-    "PROTECT": 15      # Mais curto em modo proteção
+    "NORMAL": 30,      # 10 minutos a 20s/tick
+    "REDUCED": 15,     # 5 minutos
+    "PROTECT": 10      # 3.3 minutos
 }
 
 # Position Sizing
-BASE_POSITION_SIZE_PCT = 0.10  # 10% do equity por posição
+BASE_POSITION_SIZE_PCT = 0.05  # 5% do equity por posição (base fiduciária)
 MIN_CONFIDENCE_FACTOR = 0.4    # Mínimo 40% mesmo com baixa confiança
 MAX_CONFIDENCE_FACTOR = 1.0    # Máximo 100%
 
@@ -79,7 +80,7 @@ BASE_MAX_TRADES_BY_REGIME: Dict[str, int] = {
     "ALTA_VOLATILIDADE": 1,
 }
 
-GLOBAL_TRADE_LIMIT = 8  # Máximo de trades por dia
+GLOBAL_TRADE_LIMIT = 25  # Máximo de trades por dia (aumentado de 8 para 25)
 
 # Position Limits
 MAX_OPEN_POSITIONS = {
@@ -95,11 +96,11 @@ MAX_OPEN_POSITIONS_BY_SYMBOL = {
 }
 
 # Equity Risk Rules
-EQUITY_DRAWDOWN_LIMIT = 0.25  # 25% DD bloqueia trades
-MIN_CONFIDENCE_FOR_REDUCED = 0.70
+EQUITY_DRAWDOWN_LIMIT = 0.15  # 15% DD bloqueia trades (reduzido de 25%)
+MIN_CONFIDENCE_FOR_REDUCED = 0.60  # Reduzido de 0.70 para ser mais flexível em REDUCED
 
 # Kill-Switch (freio de emergência)
-DAILY_LOSS_LIMIT = 0.03  # 3% da equity inicial
+DAILY_LOSS_LIMIT = 0.02  # 2% da equity inicial (reduzido de 3%)
 KILL_SWITCH_HOURS = 2    # Horas de pausa após kill-switch
 
 # Cooldown após stop-loss (ticks)
@@ -118,32 +119,37 @@ MIN_NEW_HIGHS_FOR_REACTIVATION = 3
 
 MIN_HISTORY_FOR_REGIME = 30  # Mínimo de dados para análise
 
-# Thresholds para detecção de regime
-RANGE_THRESHOLD = 0.004           # Amplitude relativa baixa
-SLOPE_THRESHOLD_SMALL = 0.0015    # Slope muito pequeno
-SLOPE_THRESHOLD_MEDIUM = 0.0025   # Para persistência de tendência
-SLOPE_THRESHOLD_LARGE = 0.003     # Para tendência clara
+# Thresholds para detecção de regime — Valores BASE para fiduciárias (USD/BRL)
+# Criptoativos (BTC, ETH, SOL) aplicam multiplicador CRYPTO_VOL_MULTIPLIER
+# (default 2.5x) para ajustar sensibilidade à maior volatilidade.
+CRYPTO_VOL_MULTIPLIER = 2.5  # Multiplicador de volatilidade para criptoativos
 
-VOLATILITY_RATIO_THRESHOLD = 1.2  # Volatilidade não excessiva
-CHAOS_VOLATILITY_THRESHOLD = 1.8  # Volatilidade muito alta
-CHAOS_RANGE_THRESHOLD = 0.006     # Amplitude alta
-CHAOS_MOMENTUM_THRESHOLD = 0.015  # Momentum fraco
+# Thresholds para detecção de regime (base fiduciária)
+RANGE_THRESHOLD = 0.0015           # Amplitude relativa baixa (era 0,004)
+SLOPE_THRESHOLD_SMALL = 0.0001     # Slope muito pequeno (era 0,0015)
+SLOPE_THRESHOLD_MEDIUM = 0.0002    # Para persistência de tendência (era 0,0025)
+SLOPE_THRESHOLD_LARGE = 0.0003     # Para tendência clara (era 0,003)
+
+VOLATILITY_RATIO_THRESHOLD = 1.2   # Volatilidade não excessiva
+CHAOS_VOLATILITY_THRESHOLD = 1.8   # Volatilidade muito alta
+CHAOS_RANGE_THRESHOLD = 0.003      # Amplitude alta (era 0,006)
+CHAOS_MOMENTUM_THRESHOLD = 0.005   # Momentum fraco (era 0,015)
 
 # ============================================================================
 # STRATEGY ENGINES
 # ============================================================================
 
-# Trend Following
-TREND_PRICE_THRESHOLD = 0.001     # 0.1% acima/abaixo da média
+# Trend Following — Valores base para fiduciárias
+TREND_PRICE_THRESHOLD = 0.002     # 0.2% acima/abaixo da média (era 0,001)
 TREND_CONFIDENCE = 0.82
 
-# Mean Reversion
-MEAN_REVERSION_BAND_WIDTH = 0.006  # 0.6% de largura da banda
+# Mean Reversion — Valores base para fiduciárias
+MEAN_REVERSION_BAND_WIDTH = 0.003  # 0.3% de largura da banda (era 0,006)
 MEAN_REVERSION_CONFIDENCE = 0.74
 
-# Breakout Momentum
-BREAKOUT_THRESHOLD = 0.003         # 0.3% acima máximo/abaixo mínimo
-BREAKOUT_MIN_RANGE = 0.003         # Range mínimo necessário
+# Breakout Momentum — Valores base para fiduciárias
+BREAKOUT_THRESHOLD = 0.0015         # 0.15% acima máximo/abaixo mínimo (era 0,003)
+BREAKOUT_MIN_RANGE = 0.0015         # Range mínimo necessário (era 0,003)
 BREAKOUT_CONFIDENCE = 0.68
 
 # ML Classifier
@@ -156,7 +162,7 @@ ML_APPROVAL_THRESHOLD = 0.58       # Threshold para aprovar trades
 MONITORING_INTERVAL_SECONDS = 20   # Intervalo entre checks
 TRAINING_INTERVAL_SECONDS = 3600   # Treinar ML a cada 1 hora
 KPI_REPORT_INTERVAL_SECONDS = 900  # KPIs a cada 15 minutos
-TREND_CONFIRMATION_TICKS = 2       # Número de ticks para confirmar tendência
+TREND_CONFIRMATION_TICKS = 3       # Número de ticks para confirmar tendência (era 2)
 
 MIN_TRADES_FOR_TRAINING = 30       # Mínimo de trades para treinar ML
 

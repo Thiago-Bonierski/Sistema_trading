@@ -48,8 +48,8 @@ class TestMarketRegime:
     
     def test_consolidacao(self):
         """Deve detectar consolidação quando preço varia pouco."""
-        # Preços oscilando minimamente em torno de 100
-        prices = pd.Series([100.0 + (i % 3) * 0.1 for i in range(31)])
+        # Preços oscilando minimamente em torno de 100 (variação < 0,15% para passar no novo threshold)
+        prices = pd.Series([100.0 + (i % 3) * 0.05 for i in range(31)])
         result = analyze_regime(prices)
         
         assert result["regime"] == "CONSOLIDACAO"

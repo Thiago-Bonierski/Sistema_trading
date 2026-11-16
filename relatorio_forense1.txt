@@ -1,0 +1,403 @@
+================================================================================
+RELATORIO FORENSE — SISTEMA DE TRADING AUTOMATIZADO
+================================================================================
+
+Escopo: 21 modulos Python + templates + testes + scripts
+Metodo: Leitura integral, execucao de provas empiricas (mismatch de features ML,
+        cursor SQLite, filtros mortos)
+Data: 15/11/2026
+
+--------------------------------------------------------------------------------
+RESUMO EXECUTIVO
+--------------------------------------------------------------------------------
+
+| Gravidade | Qtd |
+|-----------|-----|
+| CRITICA   |  8  |
+| MEDIA     | 11  |
+| BAIXA     | 14  |
+
+Achado central: o sistema NAO persiste estado (posicoes, equity, risco) e o
+pipeline de ML esta estruturalmente quebrado em tres camadas independentes —
+ele nunca treina em producao, nunca recarrega o modelo e, mesmo que o fizesse,
+as features de treino e inferencia sao inversiveis. O filtro de exaustao esta
+morto. A simulacao nao exercita as estrategias reais.
+
+--------------------------------------------------------------------------------
+1. BUGS CRITICOS E LOGICA FINANCEIRA
+--------------------------------------------------------------------------------
+
+1.1 [ALTA] Estado vivo apenas em RAM: reinicio apaga posicoes, equity e risco
+Arquivos: position_manager.py:70, equity.py:22-36, risk_control.py:37-89,
+          monitor.py:74-79, database.py:141-204
+
+PositionManager.positions e um dict em memoria. EquityManager e RiskController
+tambem. O schema do SQLite so possui cotacoes e trade_history — NAO existe tabela
+de posicoes abertas, equity corrente ou estado de risco. Nao ha qualquer funcao
+de restore (grep por restore/load_position/save_position retorna zero).
+
+Impacto real: ao reiniciar app.py, uma posicao aberta desaparece silenciosamente
+— o sistema deixa de gerencia-la (sem SL/TP/aging), o equity volta para
+INITIAL_CAPITAL (R$ 100.000) e o drawdown zera. O PnL do trade em curso nunca e
+realizado no equity. Em producao com capital real, isso e perda financeira direta
+e invalida todo o controle de risco.
+
+1.2 [ALTA] duration_ticks como feature de treino = Data Leakage
+Arquivo: ml_training.py:138, 159, 247
+
+duration_ticks (duracao do trade) e usada como feature para prever pnl_positive.
+No momento da entrada, a duracao e desconhecida — e um resultado do trade. O
+modelo aprende a correlacao espuria "trades que duram X tendem a ser lucrativos",
+o que e olhar o futuro.
+
+Impacto real: modelo com desempenho artificialmente inflado no treino e
+imprevisivel em producao. Classico look-ahead leakage.
+
+1.3 [MEDIA] db_manager.execute() retorna cursor de conexao fechada
+Arquivo: database.py:72-89
+
+    with self.get_connection() as conn:   # fecha a conexao no finally
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return cursor                       # cursor de conexao ja fechada
+
+Prova empirica: db_manager.execute('SELECT 1').fetchone() ->
+ProgrammingError: Cannot operate on a closed database.
+
+Impacto real: hoje nao explode porque salvar_cotacao/salvar_trade ignoram o
+retorno. E uma armadilha para qualquer uso futuro (ex: lastrowid para recuperar o
+ID inserido). O execute esta conceitualmente quebrado.
+
+1.4 [MEDIA] MLTrainer.db_path e ignorado (sempre le o banco global)
+Arquivo: ml_training.py:64-98
+
+__init__ aceita db_path e o armazena em self.db_path, mas load_trade_history()
+usa db_manager.get_connection() (que aponta para config.DB_PATH). O parametro e
+decorativo. Testes unitarios e simulacoes nao conseguem treinar em banco isolado.
+
+1.5 [BAIXA] Position sizing sem teto de margem/validacao
+Arquivo: position_manager.py:108-139
+
+_calculate_position_size aplica equity * 10% * confidence_factor sem verificar se
+o equity e positivo, se ha margem disponivel nem se o tamanho cabe no ativo. Com
+NORMAL permitindo 2 posicoes, pode alocar 20% do equity. Se confidence vier
+negativa ou NaN, o max/min pode produzir valores absurdos.
+
+1.6 [BAIXA] PnL ignora taxas, slippage e spread
+Arquivo: position_manager.py:270-280
+
+PnL = size * preco_variacao / entry. Sem custos de execucao. Em BTC/BRL e
+SOL/BRL o spread da AwesomeAPI pode ser relevante frente a um stop de 2,5%. O
+backtest e o paper trading ficam sistematicamente otimistas.
+
+1.7 [BAIXA] exit_tick calculado por aritmetica, nao pelo tick real
+Arquivo: position_manager.py:298
+
+exit_tick = entry_tick + position.age. Como age e incrementado em evaluate, isso
+e consistente apenas se evaluate for chamado uma vez por tick. Se houver
+reprocessamento ou gap, a duracao reportada diverge do tempo de mercado real.
+
+--------------------------------------------------------------------------------
+2. FALHAS DE MACHINE LEARNING E SIMULACAO
+--------------------------------------------------------------------------------
+
+2.1 [ALTA] Incompatibilidade total de features treino <-> inferencia
+Arquivos: ml_training.py:159-167 (treino) vs ml_classifier.py:136-171 (inferencia)
+
+                  | Treino (ml_training)                              | Inferencia (ml_classifier)
+------------------+----------------------------------------------------+--------------------------------------------------------------
+Features          | confidence, duration_ticks, side_signal,         | confidence, slope, momentum, range_rel,
+                  | entry_regime (one-hot), engine (one-hot)          | volatility_ratio, regime (label),
+                  |                                                  | engine (label), action (label)
+Representacao     | ColumnTransformer (StandardScaler + OneHotEncoder)| lista de 8 floats
+Dimensao          | 5 (no teste empirico)                            | 8
+
+Prova empirica: modelamos o pipeline e o ColumnTransformer rejeita:
+ValueError: X has 8 features, but ColumnTransformer is expecting 5 features as input.
+O score_trade retorna 0.9904, que e exatamente o score da HEURISTICA
+(sigmoid(4.64)), nao do modelo.
+
+Impacto real: o modelo ML e NUNCA utilizado. O classificador cai sempre na
+heuristica.
+
+2.2 [ALTA] except Exception generico engole o erro do ML
+Arquivo: ml_classifier.py:190-207
+
+    try:
+        probability = self.model.predict_proba([features])[0][1]
+        ...
+    except Exception as e:
+        logger.warning(f"Erro ao usar modelo ML, usando heuristica: {e}")
+        # Continuar para heuristica
+
+O ValueError de dimensao e capturado e silenciado (so um warning). O sistema
+opera em modo degradado sem qualquer alarme operacional.
+
+2.3 [ALTA] Modelo nunca e recarregado apos o treino
+Arquivo: monitor.py:278, ml_classifier.py:86-108
+
+training_loop chama trainer.train_model() (que salva em disco), mas NAO chama
+classifier._load_model() nem reinicia o classificador. O objeto classifier em
+memoria mantem o modelo antigo (ou None) para sempre.
+
+Impacto real: mesmo corrigindo 2.1, o modelo treinado continuaria intocado em
+memoria.
+
+2.4 [ALTA] ML nunca treina em producao via "python app.py"
+Arquivos: app.py:432-459 vs monitor.py:760-776
+
+A thread de treinamento (MLTrainingThread) so e criada no bloco
+if __name__ == "__main__" do monitor.py. O entrypoint real e o app.py, que inicia
+apenas MonitorThread + Flask. Logo, training_loop NUNCA roda quando o sistema e
+iniciado como documentado.
+
+Impacto real: o ML esta duplamente inerte — nao treina nem filtra.
+
+2.5 [MEDIA] Documentacao afirma RandomForest; codigo usa LogisticRegression
+Arquivos: ml_training.py:33 (import nao usado), ml_training.py:259, README.md:93
+
+RandomForestClassifier e importado e nunca usado. O README e o docstring prometem
+RandomForest com fallback para LogisticRegression. Codigo, doc e README estao
+desalinhados — sinal claro de refatoracao incompleta.
+
+2.6 [MEDIA] train_test_split aleatorio e sem estratificacao
+Arquivo: ml_training.py:236-240
+
+train_test_split(..., test_size=0.2, random_state=42) sem stratify=y. Para uma
+serie temporal de trades, o correto seria split temporal (ou TimeSeriesSplit), e
+com stratify para preservar a proporcao de classes (geralmente desbalanceada). O
+test_score reportado nao e confiavel.
+
+2.7 [MEDIA] Simulacao nao usa as engines reais (mock strategy)
+Arquivo: simular.py:352-382, simular.py:419
+
+mock_strategy_signal decide com random.random() por regime. As engines
+TrendFollowing/MeanReversion/BreakoutMomentum e os filtros ML/exaustao/confirmacao
+de tendencia NAO participam da simulacao. O modo PAPER_TRADING se apresenta como
+"proximo a producao", mas usa stops de 3%/3%, 1 posicao e sizing de 5% —
+parametros diferentes dos de producao.
+
+Impacto real: a simulacao NAO valida as estrategias que o bot realmente executa.
+Os numeros do relatório dual-mode nao dizem respeito ao sistema real.
+
+2.8 [BAIXA] Simulacao sem seed reproduzivel
+Arquivo: simular.py:12 (import random), simular.py:339
+
+random e usado sem seed. Rodadas produzem resultados diferentes, impedindo
+comparacao de parametros.
+
+2.9 [BAIXA] save_trades_to_db e codigo morto
+Arquivo: simular.py:459-523
+
+A funcao existe e e documentada, mas nunca e chamada em __main__. O comentario em
+run_simulation sugere seu uso, mas ele nao ocorre.
+
+--------------------------------------------------------------------------------
+3. CONCORRENCIA E THREAD-SAFETY
+--------------------------------------------------------------------------------
+
+3.1 [MEDIA] Escrita do modelo joblib nao e atomica
+Arquivo: ml_training.py:276-277
+
+joblib.dump(pipeline, str(self.model_path)) sobrescreve o arquivo em-place. Se
+outro processo/thread leitor carregar no mesmo instante, pode ler um arquivo
+truncado/corrompido. O padrao seguro e gravar em arquivo temporario + os.replace
+(rename atomico). Nao ha lock de arquivo.
+
+3.2 [MEDIA] Flask thread + monitor thread compartilham estado sem lock
+Arquivos: app.py:445-453, monitor.py:74-79, app.py:310-336
+
+A rota /api/shutdown_monitor e _montar_resumo_shutdown leem
+position_manager.positions, equity_manager, risk_controller concorrentemente com a
+MonitorThread que os muta. list(position_manager.positions.keys()) pode levantar
+RuntimeError: dictionary changed size during iteration se um pop ocorrer no meio.
+O Flask roda com threaded=True por padrao.
+
+3.3 [MEDIA] db_manager.execute() retorna cursor fora do lock
+Arquivo: database.py:72-89
+
+O lock _db_lock e liberado antes do cursor ser usado pelo chamador. Alem do cursor
+estar em conexao fechada (1.3), qualquer uso futuro ficaria fora da secao critica.
+
+3.4 [BAIXA] Estado global mutavel em monitor.py sem sincronizacao
+Arquivos: monitor.py:44-68, exhaustion_filter.py:26, monitor_base.py:23-24
+
+ultimo_status, ultimo_regime, trend_confirmation_count, last_trend_regime,
+_exhaustion_state, _last_quotes, _api_block_until sao globais mutaveis. Hoje o
+monitor e single-thread de coleta, mas a thread de treinamento e as rotas Flask
+acrescentam concorrencia. _api_block_until e lido/escrito sem lock em
+pegar_cotacao.
+
+3.5 [BAIXA] kpi_tracker compartilhado entre monitor e training sem lock
+Arquivo: monitor.py:250-274, monitor.py:269
+
+training_loop le kpi_tracker_ref.trade_count enquanto o monitor chama
+record_trade_result. Operacoes simples em CPython sao atomicas pelo GIL, mas
+leituras compostas podem observar estado inconsistente.
+
+--------------------------------------------------------------------------------
+4. SEGURANCA E TRATAMENTO DE ERROS
+--------------------------------------------------------------------------------
+
+4.1 [MEDIA] CONTROL_TOKEN placeholder e comparacao nao constant-time
+Arquivos: .env:43 (CONTROL_TOKEN=password), app.py:298-307
+
+O .env entrega CONTROL_TOKEN=password. Como o dashboard e acessivel em
+127.0.0.1:5000, quem conhecer o padrao pode pausar o monitor ou encerrar o
+processo (/api/exit_process). A comparacao usa == (nao hmac.compare_digest),
+vulneravel a timing attack — pouco relevante localmente, mas incorreto.
+
+Observacao: o _validar_token_controle e fail-closed (retorna False se o token nao
+estiver configurado), o que e bom.
+
+4.2 [MEDIA] Blocos except Exception genericos escondem falhas reais
+Arquivos: ml_classifier.py:203, app.py:78, app.py:173, database.py:63,
+          monitor_base.py:85, monitor.py:408
+
+Ha dezenas de except Exception com logger.error(..., exc_info=True). O caso do ML
+(2.2) e o mais grave: um erro de codigo (dimensao errada) e tratado como erro de
+runtime e degradado silenciosamente. Distinguir ValueError de dados vs. bug de
+codigo e essencial.
+
+4.3 [BAIXA] Rotas POST sem rate limiting nem CSRF
+Arquivo: app.py:339-409
+
+/api/shutdown_monitor e /api/exit_process nao tem limite de tentativas de token. Um
+atacante local pode forcar brute-force do token (baixo risco em localhost).
+
+4.4 [BAIXA] Telegram com token placeholder truthy
+Arquivos: .env:20-21, monitor_base.py:33-34, 56-62
+
+TELEGRAM_TOKEN=your_telegram_bot_token_here e truthy, entao enviar_mensagem tenta
+POST para api.telegram.org/botyour_telegram_bot_token_here/sendMessage e falha com
+404 a cada mudanca de status. Gera ruido de log e latencia desnecessaria. O ideal
+seria validar o formato do token.
+
+4.5 [BAIXA] teste_bot.py com URL malformada
+Arquivo: teste_bot.py:9
+
+.../sendMessage+ (sinal de + no final). O script de teste nunca funcionara.
+
+4.6 [BAIXA] Sem validacao de schema nas rotas
+Arquivo: app.py
+
+As rotas nao validam Content-Type nem corpo. Aceitam qualquer POST com o header
+correto.
+
+--------------------------------------------------------------------------------
+5. QUALIDADE DE CODIGO E DIVIDA TECNICA
+--------------------------------------------------------------------------------
+
+5.1 [ALTA] Filtro de exaustao esta morto (nunca bloqueia)
+Arquivos: exhaustion_filter.py:52-133, monitor.py:37, 590
+
+monitor.py importa e chama apenas is_exhausted(symbol, regime), que retorna o
+cache _exhaustion_state. A funcao check_exhaustion() — que faz a analise real —
+NUNCA e chamada em lugar nenhum (grep confirma). O cache inicia vazio e nunca e
+populado -> is_exhausted retorna sempre False.
+
+Impacto real: a camada de exaustao, promovida no README, e inexistente em
+producao.
+
+5.2 [ALTA] .env.example ausente mas referenciado
+Arquivos: install.sh:54, README.md:262, 276, 283
+
+install.sh executa cp .env.example .env e o README instrui o mesmo, mas o arquivo
+NAO existe no repositorio. Como o install.sh tem set -e, uma instalacao limpa
+(sem .env) falha. O .env so existe porque foi criado manualmente nesta sessao.
+
+5.3 [ALTA] python-dotenv ausente do requirements.txt
+Arquivo: requirements.txt (completo, 24 linhas)
+
+config.py:11 faz from dotenv import load_dotenv, mas python-dotenv NAO esta
+listado. Uma instalacao limpa com pip install -r requirements.txt falha na
+primeira importacao de config. Foi necessario instalar manualmente nesta sessao.
+
+5.4 [MEDIA] Duplicacao estrutural: dois PositionManager
+Arquivos: position_manager.py (423 linhas) vs simular.py:35-287
+
+A simulacao reimplementa PositionManager com regras diferentes (stops 3%/3%, PnL
+por direction, multiplas posicoes). O README afirma separacao de estado, mas a
+duplicacao gera divergencia de comportamento (2.7). O ideal seria um unico
+gerenciador parametrizavel.
+
+5.5 [MEDIA] Template do dashboard nao usa os dados que o backend envia
+Arquivos: app.py:222-229 (passa summary_*, kpi), templates/index.html
+
+O render_template passa summary_usd/btc/eth/sol e kpi, mas o index.html NAO
+referencia nenhum desses campos (so graficos). O README descreve "tabela com
+ultimos 20 trades e metricas de performance" — inexistente. Backend e frontend
+estao desalinhados.
+
+5.6 [MEDIA] dashboard.js quebra com um unico ponto de dados
+Arquivo: static/dashboard.js:52-56
+
+    const lastIndex = data.length - 1;
+    const prev = data[lastIndex - 1];      // undefined quando length === 1
+    const delta = last.preco - prev.preco; // TypeError
+
+Na primeira cotacao (ou apos gap que zera o historico), o grafico lanca excecao e
+o dashboard fica sem atualizar.
+
+5.7 [BAIXA] Codigo morto e residuos de refatoracao
+  database.py:190-198      - lista migrations definida em initialize_schema e NUNCA usada
+  database.py:37           - self._initialized nunca lido
+  ml_training.py:33        - RandomForestClassifier importado e nao usado
+  logging_config.py:90-153 - SensitiveDataFilter implementado e nunca registrado
+  kpis.py:78                - parametro exhausted nao utilizado
+  position_manager.py:141  - _build_position(symbol, ...) recebe symbol e nao usa
+  market_regime.py:53      - docstring cita List[float] sem importar List
+  simular.py:459           - save_trades_to_db nunca chamada
+
+5.8 [BAIXA] README desatualizado
+Arquivo: README.md
+
+Menciona RandomForest (codigo usa LogisticRegression), dashboard com tabela de
+trades/KPIs (inexistente) e .env.example (inexistente). Induz o usuario a erro.
+
+5.9 [BAIXA] install.sh com set -e e dependencia de .env.example
+Arquivo: install.sh
+
+O set -e combinado com cp .env.example .env torna o script fragil. Tambem nao
+valida o pip install com if (depende do set -e, que aborta sem mensagem amigavel).
+
+--------------------------------------------------------------------------------
+MATRIZ DE PRIORIZACAO (recomendacao de correcao)
+--------------------------------------------------------------------------------
+
+Onda 1 — Sobrevivencia do sistema (bloqueadores):
+ 1. Persistencia de estado (posicoes/equity/risco) em SQLite + restore no boot
+ 2. python-dotenv no requirements.txt + criar .env.example
+ 3. Filtro de exaustao: chamar check_exhaustion no monitor.process_symbol
+
+Onda 2 — Corrigir o pipeline de ML (fim a fim):
+ 4. Alinhar features treino/inferencia E remover duration_ticks (leakage)
+ 5. Recarregar o modelo no classifier apos cada treino
+ 6. Iniciar MLTrainingThread no app.py (entrypoint real)
+ 7. Substituir except Exception por tratamento especifico + alarme
+
+Onda 3 — Robustez:
+ 8. Escrita atomica do joblib (tmp + os.replace)
+ 9. Corrigir db_manager.execute (nao retornar cursor)
+10. Proteger rotas Flask contra leitura concorrente de estado
+11. Corrigir dashboard.js para data.length < 2
+12. Usar as engines reais na simulacao
+
+Onda 4 — Divida:
+13. Unificar PositionManager, revisar README, remover codigo morto, seed na simulacao
+
+--------------------------------------------------------------------------------
+PONTOS POSITIVOS (para registro)
+--------------------------------------------------------------------------------
+
+- Lock global _db_lock no SQLite e uma solucao correta para o problema de race
+  condition.
+- Separacao de modulos e clara e as responsabilidades estao bem documentadas.
+- RiskController tem logica de degradação/reativacao bem pensada em camadas.
+- Testes de equity e market_regime cobrem casos de borda relevantes.
+- config.py centraliza os magic numbers de forma exemplar.
+- O data gap guard e uma protecao de producao legitima e bem implementada.
+
+--------------------------------------------------------------------------------
+FIM DO RELATORIO
+================================================================================

@@ -6,6 +6,7 @@ Controla entradas, saídas, stop-loss, take-profit e idade das posições.
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
 import logging
+import threading
 
 import config
 
@@ -46,6 +47,52 @@ class Position:
     engine: str = ""
     confidence: float = 0.0
     details: str = ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serializa a posição para persistência.
+        
+        Returns:
+            Dict com todos os campos da posição
+        """
+        return {
+            "side": self.side,
+            "entry_price": self.entry_price,
+            "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
+            "entry_tick": self.entry_tick,
+            "position_size": self.position_size,
+            "age": self.age,
+            "regime": self.regime,
+            "engine": self.engine,
+            "confidence": self.confidence,
+            "details": self.details,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Position":
+        """
+        Reconstrói uma posição a partir de um dict persistido.
+        
+        Args:
+            data: Dict produzido por to_dict()
+            
+        Returns:
+            Instância de Position
+        """
+        return cls(
+            side=data["side"],
+            entry_price=float(data["entry_price"]),
+            stop_loss=float(data["stop_loss"]),
+            take_profit=float(data["take_profit"]),
+            entry_tick=int(data["entry_tick"]),
+            position_size=float(data["position_size"]),
+            age=int(data.get("age", 0)),
+            regime=data.get("regime", ""),
+            engine=data.get("engine", ""),
+            confidence=float(data.get("confidence", 0.0)),
+            details=data.get("details", ""),
+        )
 
 
 class PositionManager:
@@ -59,24 +106,38 @@ class PositionManager:
     - Calcular tamanhos de posição baseados em equity e confidence
     """
     
-    def __init__(self, equity_manager=None, risk_controller=None):
+    def __init__(self, equity_manager=None, risk_controller=None, symbol: str = "USD"):
         """
         Inicializa o gerenciador de posições.
-        
+
         Args:
             equity_manager: Gerenciador de equity (para sizing)
             risk_controller: Controlador de risco (para limites)
+            symbol: Símbolo da moeda (ex: "USD", "BTC", "ETH", "SOL").
+                    Criptoativos aplicam multiplicador de volatilidade
+                    para stop-loss e take-profit.
         """
         self.positions: Dict[str, Position] = {}
         self.equity_manager = equity_manager
         self.risk_controller = risk_controller
-        
-        # Parâmetros de risco
-        self.stop_loss_pct = config.DEFAULT_STOP_LOSS_PCT
-        self.take_profit_pct = config.DEFAULT_TAKE_PROFIT_PCT
-        
+        self.symbol = symbol
+        # Lock reentrante para operações atômicas de estado
+        self._lock = threading.RLock()
+        # Override opcional de max_age (usado por simulações)
+        self._max_age_override: Optional[int] = None
+
+        # Determinar multiplicador de volatilidade para criptoativos
+        crypto_symbols = ("BTC", "ETH", "SOL", "BRL-BTC", "BRL-ETH", "BRL-SOL")
+        is_crypto = any(s in symbol.upper() for s in crypto_symbols)
+        self._vol_mult = config.CRYPTO_VOL_MULTIPLIER if is_crypto else 1.0
+
+        # Parâmetros de risco (base fiduciária, com multiplicador para cripto)
+        self.stop_loss_pct = config.DEFAULT_STOP_LOSS_PCT * self._vol_mult
+        self.take_profit_pct = config.DEFAULT_TAKE_PROFIT_PCT * self._vol_mult
+
         logger.info(
-            f"PositionManager inicializado: "
+            f"PositionManager inicializado: symbol={symbol}, "
+            f"vol_mult={self._vol_mult}x, "
             f"SL={self.stop_loss_pct:.1%}, TP={self.take_profit_pct:.1%}"
         )
     
@@ -88,7 +149,10 @@ class PositionManager:
             Idade máxima em ticks
         """
         if not self.risk_controller:
-            return config.MAX_POSITION_AGE_TICKS["NORMAL"]
+            return self._max_age_override or config.MAX_POSITION_AGE_TICKS["NORMAL"]
+        
+        if self._max_age_override is not None:
+            return self._max_age_override
         
         level = self.risk_controller.aggressiveness_level
         return config.MAX_POSITION_AGE_TICKS.get(level, 40)
@@ -103,7 +167,8 @@ class PositionManager:
         Returns:
             Position se existir, None caso contrário
         """
-        return self.positions.get(symbol)
+        with self._lock:
+            return self.positions.get(symbol)
     
     def _calculate_position_size(self, confidence: float) -> float:
         """
@@ -237,7 +302,12 @@ class PositionManager:
         )
         
         if position is not None:
-            self.positions[symbol] = position
+            with self._lock:
+                # Re-verifica sob o lock (double-checked locking)
+                if self.get_position(symbol) is not None:
+                    logger.debug(f"Posição já existe para {symbol}, ignorando abertura")
+                    return None
+                self.positions[symbol] = position
             logger.info(f"✅ Posição aberta: {symbol} {side}")
         
         return position
@@ -261,7 +331,8 @@ class PositionManager:
         Returns:
             Dicionário com resultado do trade ou None
         """
-        position = self.positions.pop(symbol, None)
+        with self._lock:
+            position = self.positions.pop(symbol, None)
         
         if position is None:
             logger.warning(f"Tentativa de fechar posição inexistente: {symbol}")
@@ -380,7 +451,8 @@ class PositionManager:
             return {"action": "NEUTRO", "event": "NO_POSITION"}
         
         # Posição existe - avaliar saída
-        position.age += 1
+        with self._lock:
+            position.age += 1
         exit_reasons = []
         
         # PRIORIDADE 1: Stop-loss e Take-profit (sempre primeiro)
@@ -421,3 +493,36 @@ class PositionManager:
         
         # Manter posição
         return {"action": "HOLD", "event": "HOLD", "position": position}
+    
+    # ------------------------------------------------------------------
+    # PERSISTÊNCIA (contrato de estado único)
+    # ------------------------------------------------------------------
+    
+    def positions_to_dict(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Serializa as posições abertas para persistência.
+        
+        Returns:
+            Dict {symbol: position_dict}
+        """
+        with self._lock:
+            return {
+                symbol: position.to_dict()
+                for symbol, position in self.positions.items()
+            }
+    
+    def load_positions_dict(self, data: Dict[str, Dict[str, Any]]) -> None:
+        """
+        Restaura as posições abertas a partir de um dict persistido.
+        
+        Substitui completamente o conjunto atual de posições.
+        
+        Args:
+            data: Dict {symbol: position_dict}
+        """
+        with self._lock:
+            self.positions = {
+                symbol: Position.from_dict(p)
+                for symbol, p in data.items()
+            }
+            logger.info(f"PositionManager restaurado com {len(self.positions)} posição(ões)")
