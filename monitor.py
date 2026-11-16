@@ -20,7 +20,13 @@ import logging
 import pandas as pd
 
 import config
-from database import db_manager, salvar_cotacao, salvar_trade
+from database import (
+    db_manager,
+    salvar_cotacao,
+    salvar_trade,
+    save_all_state,
+    load_all_state,
+)
 from equity import EquityManager
 from logging_config import (
     setup_logging,
@@ -34,7 +40,7 @@ from strategy_unified import StrategyOrchestrator
 from ml_classifier import MLClassifier
 from risk_control import RiskController
 from position_manager import PositionManager
-from exhaustion_filter import is_exhausted
+from exhaustion_filter import check_exhaustion
 from kpis import KPITracker
 
 # Configurar logging
@@ -70,6 +76,10 @@ last_trend_regime: Dict[str, Optional[str]] = {
 # Stop event para shutdown gracioso
 stop_event = threading.Event()
 
+# Lock de estado vivo: protege position_manager / equity_manager / risk_controller
+# contra leitura concorrente do Flask e escrita do monitor.
+state_lock = threading.RLock()
+
 # Componentes do sistema
 orchestrator = StrategyOrchestrator()
 classifier = MLClassifier(threshold=config.ML_APPROVAL_THRESHOLD)
@@ -77,6 +87,91 @@ risk_controller = RiskController()
 equity_manager = EquityManager(initial_capital=config.INITIAL_CAPITAL)
 position_manager = PositionManager(equity_manager, risk_controller)
 kpi_tracker = KPITracker()
+
+
+# ============================================================================
+# PERSISTÊNCIA DO ESTADO VIVO (fonte única de verdade)
+# ============================================================================
+
+def restore_state() -> bool:
+    """
+    Restaura posições, equity e risco do SQLite no boot.
+    
+    Returns:
+        True se havia estado persistido e foi restaurado
+    """
+    try:
+        state = load_all_state()
+    except Exception as e:
+        logger.error(f"Falha ao carregar estado persistido: {e}", exc_info=True)
+        return False
+    
+    restored = False
+    
+    if state.get("positions"):
+        try:
+            position_manager.load_positions_dict(state["positions"])
+            logger.info(f"♻️ {len(state['positions'])} posição(ões) restaurada(s)")
+            restored = True
+        except Exception as e:
+            logger.error(f"Falha ao restaurar posições: {e}", exc_info=True)
+    
+    if state.get("equity"):
+        try:
+            equity_manager.load_state_dict(state["equity"])
+            logger.info(
+                f"♻️ Equity restaurado: R$ {equity_manager.current_equity:,.2f}"
+            )
+            restored = True
+        except Exception as e:
+            logger.error(f"Falha ao restaurar equity: {e}", exc_info=True)
+    
+    if state.get("risk"):
+        try:
+            risk_controller.load_state_dict(state["risk"])
+            logger.info(
+                f"♻️ Risco restaurado: nível={risk_controller.aggressiveness_level}"
+            )
+            restored = True
+        except Exception as e:
+            logger.error(f"Falha ao restaurar risco: {e}", exc_info=True)
+    
+    if not restored:
+        logger.info("Nenhum estado persistido encontrado — iniciando do zero")
+    
+    return restored
+
+
+def persist_state() -> None:
+    """
+    Persiste posições, equity e risco em uma única transação.
+    """
+    try:
+        with state_lock:
+            positions = position_manager.positions_to_dict()
+            equity_state = equity_manager.to_state_dict()
+            risk_state = risk_controller.to_state_dict()
+        save_all_state(positions, equity_state, risk_state)
+    except Exception as e:
+        logger.error(f"Falha ao persistir estado: {e}", exc_info=True)
+
+
+def get_state_snapshot() -> Dict[str, Any]:
+    """
+    Retorna um snapshot consistente e imutável do estado vivo.
+    
+    Usado pelo Flask para nunca acessar o estado corrente diretamente,
+    evitando RuntimeError por dicionário mutado durante iteração.
+    
+    Returns:
+        Dict com positions (dicts), equity (summary) e risk (status)
+    """
+    with state_lock:
+        return {
+            "positions": position_manager.positions_to_dict(),
+            "equity": equity_manager.get_summary(),
+            "risk": risk_controller.get_risk_status(),
+        }
 
 
 def get_last_collection_epoch(symbol: str) -> Optional[int]:
@@ -147,6 +242,9 @@ def close_position_due_to_data_gap(
 
     # Salvar no banco
     salvar_trade_history(trade_result)
+
+    # Persistir estado vivo (posição fechada por data gap)
+    persist_state()
 
     # Log estruturado
     log_trade_execution(logger, trade_result)
@@ -277,6 +375,9 @@ def training_loop(trainer, kpi_tracker_ref: KPITracker) -> None:
             logger.info("Iniciando treinamento periódico do ML...")
             resultado = trainer.train_model()
             
+            # Recarregar o modelo no classificador em produção (hot-reload)
+            classifier.reload_model()
+
             logger.info(
                 f"✅ Treino concluído: score={resultado.get('test_score', 0.0):.4f}"
             )
@@ -383,9 +484,13 @@ def loop_monitoramento() -> None:
     """
     logger.info("🚀 Loop de monitoramento iniciado")
     
+    # Restaurar estado persistido (posições, equity, risco)
+    restore_state()
+    
     # Inicializar contador de ticks
     tick_count = 0
     last_kpi_report_time = time.time()
+    last_persist_time = time.time()
     
     # Símbolos a monitorar
     symbols = list(config.API_PAIRS.keys())
@@ -401,16 +506,22 @@ def loop_monitoramento() -> None:
             # Processar cada símbolo
             for symbol in symbols:
                 try:
-                    process_symbol(
-                        symbol=symbol,
-                        tick_count=tick_count,
-                    )
+                    with state_lock:
+                        process_symbol(
+                            symbol=symbol,
+                            tick_count=tick_count,
+                        )
                 except Exception as e:
                     logger.error(
                         f"Erro ao processar {symbol}: {e}",
                         exc_info=True
                     )
                     continue
+            
+            # Persistência periódica do estado vivo (a cada ~10 min)
+            if current_time - last_persist_time >= 600:
+                persist_state()
+                last_persist_time = current_time
             
             # Gerar relatório de KPIs periodicamente
             if current_time - last_kpi_report_time >= config.KPI_REPORT_INTERVAL_SECONDS:
@@ -429,6 +540,8 @@ def loop_monitoramento() -> None:
         logger.critical(f"Erro crítico no loop de monitoramento: {e}", exc_info=True)
         raise
     finally:
+        # Persistir estado ao finalizar
+        persist_state()
         logger.info("Loop de monitoramento finalizado")
 
 
@@ -566,7 +679,7 @@ def process_symbol(symbol: str, tick_count: int) -> None:
     
     # Analisar tendência e regime
     historico_precos = analisar_tendencia(nome_db, preco)
-    regime_info = analyze_regime(historico_precos)
+    regime_info = analyze_regime(historico_precos, symbol=nome_db)
     regime = regime_info["regime"]
 
     # Atualizar confirmação de tendência
@@ -585,25 +698,7 @@ def process_symbol(symbol: str, tick_count: int) -> None:
     # Atualizar drawdown no risk controller
     equity_dd = equity_manager.get_current_drawdown()
     risk_controller.update_drawdown(equity_dd, equity_manager.current_equity)
-    
-    # Verificar exaustão
-    if is_exhausted(symbol, regime):
-        logger.debug(f"{symbol} está em estado de exaustão, aguardando...")
 
-        salvar_cotacao(
-            horario=horario,
-            preco=preco,
-            moeda=nome_db,
-            recomendacao="NEUTRO",
-            regime=regime,
-            engine="ExhaustionFilter",
-            confidence=0.0,
-            details="Símbolo em exaustão",
-            ml_score=None,
-            collected_at_epoch=collected_at_epoch,
-        )
-        return
-    
     # Executar estratégia
     resultado = orchestrator.evaluate(
         price=preco,
@@ -618,7 +713,63 @@ def process_symbol(symbol: str, tick_count: int) -> None:
         regime=regime,
         suggestion=resultado
     )
-    
+
+    # Verificar exaustão (usando a análise real, não um cache vazio)
+    # A verificação acontece depois da sugestão da estratégia, pois precisa
+    # do regime_metrics e da ação para aplicar os critérios de exaustão.
+    # Bloqueia ANTES de abrir posição; saídas de posições existentes não
+    # são afetadas pelo filtro de exaustão.
+    if resultado.get("action") in ("COMPRA", "VENDA"):
+        exhausted, ex_reason = check_exhaustion(
+            prices=historico_precos,
+            regime_metrics=regime_info,
+            suggestion=resultado,
+            symbol=nome_db,
+        )
+        if exhausted:
+            logger.info(
+                f"🛑 {symbol}: entrada {resultado['action']} bloqueada por "
+                f"exaustão ({ex_reason})"
+            )
+            filtrado = resultado.copy()
+            filtrado["action"] = "NEUTRO"
+            filtrado["confidence"] = 0.0
+            filtrado["details"] = f"Exaustão: {ex_reason}"
+            filtrado["engine"] = "ExhaustionFilter"
+            filtrado["ml_score"] = None
+            resultado = filtrado
+
+            salvar_cotacao(
+                horario=horario,
+                preco=preco,
+                moeda=nome_db,
+                recomendacao="NEUTRO",
+                regime=regime,
+                engine="ExhaustionFilter",
+                confidence=0.0,
+                details=f"Exaustão: {ex_reason}",
+                ml_score=None,
+                collected_at_epoch=collected_at_epoch,
+            )
+            # Registrar sinal bloqueado no KPI
+            kpi_tracker.record_signal(
+                symbol=symbol,
+                regime=regime,
+                engine="ExhaustionFilter",
+                action="NEUTRO",
+                confidence=0.0,
+            )
+            # Pular avaliação de posição (nenhuma entrada)
+            status_ia = "NEUTRO"
+            ultimo_status[nome_db] = status_ia
+            logger.info(
+                f"✅ {nome_db}: R$ {preco:.2f} | {status_ia} | {regime} | "
+                f"Engine: {resultado.get('engine', 'N/A')} | "
+                f"Conf: {resultado.get('confidence', 0.0):.2f} | "
+                f"Equity: R$ {equity_manager.current_equity:,.2f}"
+            )
+            return
+
     # Aplicar filtro ML se disponível
     if classifier.is_trained():
         resultado = classifier.filter_signal(resultado, regime_info)
@@ -670,10 +821,15 @@ def process_symbol(symbol: str, tick_count: int) -> None:
             
             # Log
             log_trade_execution(logger, trade_result)
+            
+            # Persistir estado vivo (posição fechada, equity e risco atualizados)
+            persist_state()
     
     elif status_ia in ("COMPRA", "VENDA"):
         # Nova posição aberta - registrar no risk controller
         risk_controller.register_trade(nome_db, regime, status_ia)
+        # Persistir estado vivo (posição aberta)
+        persist_state()
     
     # Salvar cotação no banco
     salvar_cotacao(

@@ -1,0 +1,86 @@
+# Relatório técnico — Investigação forense pós-refatoração (somente leitura)
+
+**Escopo lido (integralmente):** `app.py`, `monitor.py`, `simular.py`, `simulation_telemetry.py`, `strategy_unified.py`, `market_regime.py`, `exhaustion_filter.py`, `position_manager.py`, `risk_control.py`, `equity.py`, `ml_training.py`, `ml_classifier.py`, `features.py`, `database.py`, `config.py` e testes (`tests/test_*.py`).  
+**Status:** nenhuma alteração de código/arquivos foi realizada (conforme solicitado).
+
+---
+
+## 1) Paridade real entre Produção (`monitor.py`) e Simulação (`simular.py`)
+
+| # | Arquivo:linha | Gravidade | Achado | Correção recomendada |
+|---|---|---|---|---|
+| 1.1 | `monitor.py:682` | **Crítica (calibração cripto em produção)** | Produção chama `analyze_regime(historico_precos)` sem `symbol`. `market_regime.py` aplica `CRYPTO_VOL_MULTIPLIER` apenas quando `symbol` indica cripto (`market_regime.py:100-108, 165-171`), então BTC/ETH/SOL em produção usam thresholds base fiduciários (subdetecção/instabilidade relativa ao modelo calibrado). Simulação já passa símbolo (`simular.py:736, 770, 806`). | Chamar `analyze_regime(historico_precos, symbol=nome_db)` e propagar `symbol` em toda análise de regime em produção. |
+| 1.2 | `monitor.py:723` + `monitor.py:43` | **Crítica (quebra de runtime)** | Importa `check_exhaustion` (`monitor.py:43`) mas invoca `exhaustion_filter.check_exhaustion(...)` (`monitor.py:723`) sem importar o módulo `exhaustion_filter`. Ao atingir um sinal `COMPRA/VENDA`, tende a gerar `NameError`, interrompendo o processamento do símbolo/tick. Simulação usa corretamente `check_exhaustion(...)` (`simular.py:867`). | Padronizar: `from exhaustion_filter import check_exhaustion` + chamar `check_exhaustion(...)`, ou `import exhaustion_filter` + `exhaustion_filter.check_exhaustion(...)` (consistente em todo o arquivo). |
+| 1.3 | `monitor.py:548-636`, `monitor.py:711-715` vs `simular.py:841-863` | **Média (paridade de confirmação de tendência)** | Produção implementa confirmação temporal real por contagem consecutiva (`TREND_CONFIRMATION_TICKS`, estado `trend_confirmation_count/last_trend_regime`, `update_trend_confirmation` + `apply_trend_confirmation_filter`, `monitor.py:548-636, 686, 711-715`). Simulação apenas exige alinhamento ação↔regime no tick atual e possui `pass` com comentário de confirmação simples (`simular.py:845-863`), sem contador persistente entre ticks. | Implementar no simulador o mesmo mecanismo de confirmação por N ticks consecutivos (ou extrair filtro compartilhado) para paridade de entradas. |
+| 1.4 | `monitor.py:517`, `monitor.py:698-700` vs `simular.py:977-978`, `simular.py:909-915` | **OK (alinhado no essencial)** | Ambos decrementam cooldowns por tick (`risk_controller.tick()` em `monitor.py:517`, `simular.py:978`) e atualizam drawdown/agressividade antes da decisão (`monitor.py:699-700` usa `equity_manager.get_current_drawdown()` + `risk_controller.update_drawdown(...)`; simulação aplica controles via `RiskController/PositionManager` oficiais com `risk_ctrl.tick()`). Cadeia de filtros de entrada (regime/estratégia, confirmação, exaustão, ML, risco/slot) existe nos dois lados, porém com diferenças de implementação citadas acima. | Manter extração de componentes/filtros comuns para evitar divergência futura. |
+| 1.5 | `monitor.py:37, 649-650, 681-683` / `config.py:208-213` vs `simular.py:368-418, 691-699` | **Média (paridade de fonte/dados e escopo de ativos)** | Produção opera via `pegar_cotacao`/AwesomeAPI + persistência em `cotacoes` e histórico por símbolo (USD/BTC/ETH/SOL em `config.API_PAIRS`, `monitor.py:50-79, 649, 681`). Simulação suporta `synthetic|db|api` (Binance) com cache e paginação (`simular.py:368-418`). Diferença de provedor/sinal temporal é esperada, mas implica que resultados de simulação Binance não são 1:1 com produção AwesomeAPI sem normalização equivalente. | Documentar explicitamente a não-equivalência de microestrutura/fonte; opcionalmente suportar pipeline de dados unificado para validação de paridade. |
+| 1.6 | `simular.py:867-872`, `simular.py:910` | **Baixa (rastreabilidade em simulação)** | Exaustão e posições usam símbolo fixo `"SIM"` (`simular.py:870, 910`) em vez do ativo real, reduzindo granularidade de telemetria/cache de estado por ativo dentro da simulação multiativo/diagnósticos futuros. | Propagar `symbol` real para `check_exhaustion`, `position_mgr.evaluate/register_trade/close_position` e telemetria quando aplicável. |
+
+---
+
+## 2) Anomalias de lógica e telemetria (ex.: `ProtectFlat` executando trades)
+
+### 2.1 Causa-raiz do caso SOL (`ProtectFlat` com 5 trades negativos em `TRANSICAO`)
+**Conclusão:** não há evidência de abertura indevida por `ProtectFlat`; há **erro de atribuição na telemetria/KPIs da simulação** (engine/regime/confiança de entrada registrados a partir do tick de saída).
+
+- **Evidências (simulação):**
+  - `engine_name` é capturado do resultado **do tick atual** do orquestrador: `simular.py:833`.
+  - No fechamento (`SAIR`), o `TradeRecord` usa `engine_name`/`resultado`/`regime` atuais (tick de saída) como entrada e como final, em vez dos dados de abertura: `simular.py:939-956`
+    - `regime_entry=...regime` atual (`:944`)
+    - `engine_entry=...engine_name` atual (`:945`)
+    - `confidence_entry=resultado.get("confidence", 0.0)` atual (`:946`)
+    - `final_engine=...engine_name` atual (`:954`)
+  - Contadores de performance por engine/regime no relatório também usam `engine_name`/`regime` do tick de saída: `simular.py:958-962`.
+  - O `trade_result` retornado por `PositionManager.close_position` já contém os metadados corretos de entrada (`entry_regime`, `engine`, `confidence`, `entry_price`, `entry_tick`, `duration_ticks`, etc.): `position_manager.py:366-387`.
+- **Comportamento consistente com o relato:** uma posição aberta por `TrendFollowing` em tendência pode ser encerrada depois em `TRANSICAO` (regime de risco no `PositionManager.evaluate`, prioridade 2 de saída) — `position_manager.py:461-473`. No tick de saída, em `TRANSICAO` o orquestrador pode eleger candidatas `Breakout + TrendFollowing` (`strategy_unified.py:463, 488-492`) ou cair em `ProtectFlat` se todas neutras (`strategy_unified.py:577-585`), e esse engine do tick final é o que acaba atribuído indevidamente ao trade.
+
+| # | Arquivo:linha | Gravidade | Achado | Correção recomendada |
+|---|---|---|---|---|
+| 2.1 | `simular.py:833, 939-962` | **Alta** | Atribuição incorreta de entrada/performance: usa engine/regime/confiança do tick de fechamento; ignora `trade_result['engine'|'entry_regime'|'confidence'|'entry_tick']`. | Ao fechar: derivar `engine_entry/trade attribution` de `trade_result['engine']`, `regime_entry` de `trade_result['entry_regime']`, `confidence_entry` de `trade_result['confidence']`, `entry_tick/entry_price` de `trade_result`; usar `regime`/engine do tick atual apenas como `final_*` (quando fizer sentido). Agregar `engine_trades/engine_pnl` e `regime_trades/regime_pnl` pela engine/regime de **entrada** (ou separar entrada vs saída explicitamente). |
+| 2.2 | `simulation_telemetry.py:75-91, 229-236` | **Média** | `TradeRecord` armazena `final_regime/final_engine`, mas `get_funnel_report()` agrega trades por `regime_entry/engine_entry` (correto conceitualmente) e `export_to_dataframe()` não exporta `final_*` (`simulation_telemetry.py:312-329`), dificultando auditoria entrada×saída. | Exportar campos finais no DataFrame de trades e, se necessário, expor agregações separadas (por engine/regime de entrada e de saída) para evitar interpretações ambíguas. |
+| 2.3 | `simular.py:845-863` | **Média** | Filtro de tendência no simulador não implementa contagem de confirmação (ramo `else: pass`), o que altera o conjunto de entradas elegíveis vs produção e pode distorcer análises de atribuição/causa. | Unificar lógica de confirmação com `monitor.py` (estado por símbolo/ticks consecutivos) e registrar motivo/bloqueio de forma idêntica. |
+
+### 2.2 Abertura de ordens em `ProtectFlat` / `TRANSICAO`
+**Conclusão:** não foi identificado caminho direto de abertura por `ProtectFlat` (engine retorna `NEUTRO`, `strategy_unified.py:337-378`) nem por `TRANSICAO` no fluxo nominal atual; há barreiras redundantes, mas com lacunas de consistência/paridade.
+
+- `PositionManager.evaluate`: bloqueia nova entrada se `regime in ("TRANSICAO","ALTA_VOLATILIDADE")` quando não há posição (`position_manager.py:418-440`) e também prioriza saída por `regime_risk` (`position_manager.py:461-473`).
+- `RiskController.can_trade/can_execute`: bloqueia entradas em modo `PROTECT` e, em `REDUCED`, bloqueia `TRANSICAO/ALTA_VOLATILIDADE` ou baixa confiança (`risk_control.py:296-353, 441-534`).
+- Monitor: confirmação de tendência exige regime esperado para ação direcional, o que bloqueia entradas fora de tendência (inclui `TRANSICAO`) (`monitor.py:597-636, 711-715`).
+- Simulador: bloqueio inline se `regime != expected` para `COMPRA/VENDA` (`simular.py:845-854`).
+
+| # | Arquivo:linha | Gravidade | Achado | Correção recomendada |
+|---|---|---|---|---|
+| 2.4 | `simular.py:845-863, 908-916` / `monitor.py:711-715, 786-794` | **Baixa (hardening/paridade)** | A proteção contra entrada em `TRANSICAO`/contexto defensivo depende de múltiplas camadas distribuídas; a simulação não replica integralmente a confirmação temporal da produção. Não foi observado bypass direto, mas a ausência de um guarda central explícito “não abrir se `engine==ProtectFlat` ou regime volátil/transição” aumenta risco de regressão. | Adicionar guarda explícito e compartilhado antes de `open_position/register_trade`: bloquear `COMPRA/VENDA` quando `resultado.engine == "ProtectFlat"` ou `regime in {"TRANSICAO","ALTA_VOLATILIDADE"}` (além dos filtros existentes) e cobrir com teste. |
+
+---
+
+## 3) Integridade do pipeline de ML, estado e concorrência
+
+| # | Arquivo:linha | Gravidade | Achado | Correção recomendada |
+|---|---|---|---|---|
+| 3.1 | `database.py:80-107, 435-536, 614-667`, `monitor.py:124-166, 521-545, 826, 832`, `app.py:465-496` | **OK (fundação de estado transacional/snapshot)** | Persistência do estado vivo usa transação única via `save_all_state` (`database.py:614-667`), snapshot consistente sob `state_lock` (`monitor.py:150-166`), restauração no boot (`monitor.py:97-146`, `app.py:476-481`) e persistência periódica/final (`monitor.py:521-545`). API de controle valida token com `hmac.compare_digest` e rejeita placeholders (`app.py:306-329`). | Manter cobertura de testes para restauração parcial/corrompida e snapshots sob carga concorrente. |
+| 3.2 | `monitor.py:412-417, 520`, `ml_training.py:190-291`, `ml_classifier.py:100-157, 213-265` | **Média (race condition de hot-reload/inferência ML)** | Treino periódico roda em thread daemon e, após salvar, chama `classifier.reload_model()` (`monitor.py:412-417`). `MLTrainer.train_model()` faz escrita atômica (`.tmp` + `os.replace`, `ml_training.py:281-285`) — bom. Porém `MLClassifier` não possui lock: `_load_model/_maybe_reload/reload_model` e leituras de `self.model/_last_mtime` concorrem com `score_trade/filter_signal/is_trained` do loop de monitoramento (`ml_classifier.py:100-157, 213-265, 296-334`). Pode ocorrer leitura durante troca de referência/estado interno e comportamento intermitente (fallback/erro) sob concorrência. | Proteger `MLClassifier` com `RLock` (ou `threading.Lock`) para mutações e leituras de `model/_last_mtime`; opcionalmente carregar para variável local e trocar referência atomicamente sob lock. |
+| 3.3 | `ml_classifier.py:243-265, 296-334` | **Média (falha silenciosa/parcial no caminho ML)** | `score_trade` levanta `RuntimeError` em falha de predição com modelo carregado (`ml_classifier.py:260-265`), mas `filter_signal` captura e cai para heurística (`ml_classifier.py:318-334`). Isso evita queda do loop, porém mascara degradação do modelo em produção (diagnóstico depende de logs). | Expor métrica/contador de fallback por erro de inferência, marcar estado de saúde do modelo no snapshot/dashboard e limitar fallback por janela/threshold de erros. |
+| 3.4 | `database.py:31, 80-107` (arquitetura) / `monitor.py:124-129, 150-166` | **Baixa (escala/concorrência de I/O)** | `DatabaseManager` serializa todas as conexões com lock global de processo (`database.py:31, 80-107`). É seguro contra race conditions intra-processo, mas pode limitar throughput e bloquear leituras do dashboard durante operações longas de escrita. | Avaliar padrão de conexão por operação com WAL (`PRAGMA journal_mode=WAL`), busy timeout adequado e separação de leitura/escrita conforme carga. |
+| 3.5 | `ml_training.py:53-62`, `ml_classifier.py:52-58` vs `app.py:22, 465-496` | **Baixa (consistência operacional de dependências/ciclo ML)** | `app.py` carrega `ml_training`/`MLTrainer` no startup standalone (`app.py:22, 32, 486`) e importa módulos com dependências opcionais; em ambientes sem `scikit-learn/joblib` o caminho de ML degrada para heurística/falha de treino. A orquestração do treino também difere entre `app.py` e `monitor.py` `__main__` (threads/ciclo de vida), o que pode confundir operação. | Unificar bootstrap (um único ponto que inicia monitor+treino+API), validar dependências no startup e expor status de ML/treino no health/dashboard. |
+
+---
+
+## 4) Resíduos, código morto e qualidade dos testes
+
+| # | Arquivo:linha | Gravidade | Achado | Correção recomendada |
+|---|---|---|---|---|
+| 4.1 | `simular.py:263-365, 432-461` | **Média (código morto / manutenção)** | `SimulationDataEngine` e `initialize_market_data` não são usados pelo fluxo principal de `run_simulation/main` (que implementa sua própria lógica de carga/loop). Mantêm comportamento paralelo (ex.: detecção de regime heurística própria) e aumentam risco de divergência. | Remover ou integrar efetivamente ao `run_simulation`; se mantidos, adicionar testes que garantam equivalência com o caminho principal. |
+| 4.2 | `simular.py:412` | **Baixa (resíduo de debug)** | Log de diagnóstico `logger.info(f"🔍 get_historical_prices: ...")` permanece no caminho de API. | Trocar para `logger.debug` ou remover após estabilização. |
+| 4.3 | `simular.py:691-699` | **Baixa (acoplamento/clareza)** | `run_simulation` faz `from simular import get_historical_prices as _ghp` dentro da função e reatribui `market/data_source_enum` em fallback. Funciona, mas é confuso (especialmente em execução como script vs módulo) e dificulta rastreio. | Chamar `get_historical_prices` diretamente, simplificar fallback e explicitar fluxo de fonte efetiva no retorno/log. |
+| 4.4 | `simulation_telemetry.py:42-48, 233-236` | **Baixa (modelo de telemetria incompleto)** | `SignalSource` inclui `ML_CLASSIFIER`/`EXHAUSTION_FILTER`/`TREND_CONFIRMATION`, mas `record_trade` agrega `trades_by_engine` por `engine_entry.value` (`229-236`) — engines/filtros que não abrem trades são contabilmente irrelevantes nesse campo, enquanto eventos de bloqueio ficam apenas em `filter_stats`; pode induzir leitura incorreta. | Separar claramente “engine de entrada do trade” vs “camada que bloqueou” no schema/relatório e restringir enums usados em cada contexto. |
+| 4.5 | `tests/test_simulation.py:85-105, 127-177` | **Média (testes superficiais para pontos críticos)** | `test_funnel_report_structure` valida apenas presença de chaves, não consistência interna (ex.: `total_signals_approved`, somas de bloqueios, coerência entrada×saída). `test_dataframe_export` valida apenas não-vazio/colunas básicas e ignora atributos de entrada/saída. Não há teste cobrindo atribuição correta de `engine_entry/regime_entry` no fechamento nem paridade de confirmação de tendência. | Adicionar testes de regressão para: atribuição por trade (engine/regime de entrada vs saída), contagem de confirmação no simulador, bloqueio explícito `ProtectFlat/TRANSICAO`, e chamada correta de `analyze_regime(..., symbol=...)` em produção/simulação. |
+| 4.6 | Diretórios de runtime no workspace (`data_cache/`, `reports/`, `simulation_reports/`, `logs/`, `__pycache__/`, `.pytest_cache/`) | **Baixa (higiene de repositório)** | Artefatos gerados e caches locais estão presentes no workspace (úteis localmente, mas ruidosos para auditoria/versionamento se não ignorados). | Garantir `.gitignore` adequado e limpeza periódica de artefatos não-fonte; manter apenas fixtures/datasets necessários e versionados. |
+
+---
+
+## Síntese executiva (priorização)
+- **Críticas imediatas:** `monitor.py:723` (chamada de exaustão potencialmente quebrada por `NameError`) e `monitor.py:682` (regime cripto sem multiplicador de volatilidade em produção).
+- **Alta (confiabilidade analítica):** `simular.py:939-962` atribui engine/regime/confiança de entrada pelo tick de saída, explicando a anomalia observada (`ProtectFlat`/`TRANSICAO` nos relatórios da SOL) sem indicar, por si só, abertura indevida.
+- **Médias relevantes:** ausência de lock no hot-reload/inferência de ML, divergência de confirmação de tendência simulação×produção, e lacunas de testes para invariantes de telemetria/atribuição.
+- **Nenhuma correção aplicada neste relatório.** Aguardando sua aprovação para implementar as correções priorizadas (começando por monitor/exaustão+regime e telemetria de atribuição no simulador) e depois executar `pytest -v` e o backtest solicitado da SOL para validação.
