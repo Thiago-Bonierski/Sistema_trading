@@ -171,6 +171,29 @@ class TestHelpersDasEngines:
         assert all(0.1 <= s <= 1.0 for s in escalas)
 
 
+class TestCalibracaoTrendFollowing:
+    def test_threshold_calibrado_e_usado_pela_engine(self):
+        assert config.TREND_PRICE_THRESHOLD == 0.004
+        assert TrendFollowingEngine().price_threshold == 0.004
+
+    def test_filtra_ruido_mas_mantem_tendencia_real(self):
+        engine = TrendFollowingEngine()
+        metrics = {"regime": "TENDENCIA_ALTA", "momentum": 0.01}
+        base = pd.Series([100.0] * 15)
+
+        # 0,3% acima da média: ruído em 1m, não deve abrir posição.
+        ruido = engine.suggest(
+            pd.concat([pd.Series([100.3]), base]), 100.3, metrics
+        )
+        assert ruido["action"] == "NEUTRO"
+
+        # 0,5% acima da média: tendência real, deve sinalizar COMPRA.
+        tendencia = engine.suggest(
+            pd.concat([pd.Series([100.5]), base]), 100.5, metrics
+        )
+        assert tendencia["action"] == "COMPRA"
+
+
 class TestConfirmacaoConsolidacao:
     def test_consolidacao_conta_confirmacao_e_aceita_dois_lados(self, monkeypatch):
         monkeypatch.setattr(config, "TREND_CONFIRMATION_TICKS", 2)

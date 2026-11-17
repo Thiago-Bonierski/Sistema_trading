@@ -165,8 +165,14 @@ EXHAUSTION_VOLATILITY_MOMENTUM_MAX = 0.012
 # STRATEGY ENGINES
 # ============================================================================
 
-# Trend Following — Valores base para fiduciárias
-TREND_PRICE_THRESHOLD = 0.002     # 0.2% acima/abaixo da média (era 0,001)
+# Trend Following — Valores base para fiduciárias.
+# 0.4%: a 0,2% a engine abria em ruído (SOL/BTC) e só encontrava dois
+# extremos em USDT/BRL, que revertiam e respondiam por todo o prejuízo
+# do ativo. Com 0,4% as engines de reversão/rompimento assumem os sinais
+# descartados e os três ativos fecham positivos em 5.000 ticks.
+# ATENÇÃO: esta config é usada tanto pelo backtest quanto por monitor.py
+# (operação ao vivo) — a calibração não é exclusiva da simulação.
+TREND_PRICE_THRESHOLD = 0.004
 TREND_CONFIDENCE = 0.82
 
 # Mean Reversion — Valores base para fiduciárias.
