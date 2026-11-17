@@ -43,6 +43,10 @@ from logging_config import setup_logging
 from market_regime import analyze_regime
 from ml_classifier import MLClassifier
 from position_manager import PositionManager
+# Importar o singleton carrega runtime_config.json e aplica os overrides no
+# módulo `config`. Sem isto a CLI rodava com Defaults enquanto o painel
+# (app.py) usava os valores efetivos — quebra de paridade.
+from runtime_config import runtime_config  # noqa: F401
 from risk_control import RiskController
 from strategy_unified import StrategyOrchestrator
 from exhaustion_filter import check_exhaustion, reset_exhaustion_state
@@ -524,7 +528,7 @@ def run_simulation(
         risk_ctrl.aggressiveness_level = "REDUCED"
         risk_ctrl.max_trades_by_regime = config.get_regime_limits("REDUCED")
         max_positions = 1
-        max_age = 15
+        max_age = config.MAX_POSITION_AGE_TICKS["REDUCED"]
     else:
         # Modo agressivo: até 5 posições, NORMAL
         risk_ctrl.aggressiveness_level = "NORMAL"
@@ -554,9 +558,11 @@ def run_simulation(
     # Núcleo único de decisão (o mesmo usado por monitor.py).
     #
     # A simulação gerencia o nível de agressividade explicitamente por modo
-    # (PAPER=REDUCED, RESEARCH=NORMAL) e preserva a semântica histórica do
-    # backtest: não atualiza drawdown nem reseta contadores por regime a
-    # cada mudança. O monitor mantém ambos habilitados (defaults do pipeline).
+    # (PAPER=REDUCED, RESEARCH=NORMAL). O reset de contadores por mudança de
+    # regime permanece habilitado, exatamente como em produção: sem ele o
+    # `trade_count_by_regime` satura e o RiskController bloqueia todas as
+    # entradas com `regime_limit` depois dos primeiros trades.
+    # O drawdown continua sem atualização para preservar o nível fixo do modo.
     pipeline = DecisionPipeline(
         orchestrator=orchestrator,
         position_manager=position_mgr,
@@ -567,7 +573,7 @@ def run_simulation(
         check_exhaustion=check_exhaustion,
         trend_tracker=trend_tracker,
         update_drawdown=False,
-        reset_regime_counts=False,
+        reset_regime_counts=True,
         apply_ml=use_ml,
     )
 
@@ -584,8 +590,12 @@ def run_simulation(
         market = SyntheticMarket(seed=seed, n_ticks=ticks)
         prices_series = None
     else:
-        from simular import get_historical_prices as _ghp
-        prices_series = _ghp(
+        # Chamar a função deste módulo diretamente. O antigo
+        # `from simular import get_historical_prices` criava um SEGUNDO
+        # módulo quando rodávamos como script (__main__), com uma classe
+        # DataSource distinta: `source == DataSource.API` falhava e o CLI
+        # caía em dados sintéticos mesmo com --source api.
+        prices_series = get_historical_prices(
             source=data_source_enum,
             symbol=symbol,
             n_points=ticks,
@@ -709,6 +719,13 @@ def run_simulation(
                 "range_rel": regime_info.get("range_rel", 0.0),
                 "volatility_ratio": regime_info.get("volatility_ratio", 1.0),
             }
+
+        # Relógio simulado: a cada 1.440 candles vira o dia e reseta os
+        # limites diários (global, por regime, kill-switch, cooldowns lógicos).
+        # Sem isto o backtest de 5.000 ticks congelava após o primeiro dia.
+        risk_ctrl.set_simulation_tick(
+            tick, current_equity=equity_mgr.current_equity
+        )
 
         # Decisão única: regime -> orquestrador -> filtros -> ML -> risco/posição
         event = MarketEvent(

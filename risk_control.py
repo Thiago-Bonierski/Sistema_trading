@@ -4,7 +4,7 @@ Controlador de risco do sistema de trading.
 Gerencia limites de exposição, drawdown, kill-switch e agressividade.
 """
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, DefaultDict, Optional, Any
 from functools import wraps
 import logging
@@ -92,8 +92,15 @@ class RiskController:
         # Regras de reativação
         self.new_high_counter: int = 0
         self.min_new_highs_for_reactivation: int = config.MIN_NEW_HIGHS_FOR_REACTIVATION
-        self.last_reset_day: datetime.date = datetime.now().date()
+        self.last_reset_day: date = datetime.now().date()
         self.last_equity_high: float = 0.0
+
+        # Relógio simulado. Em backtest o tempo real não avança, então o dia
+        # é derivado do tick (1.440 candles de 1m = 1 dia). Fora de simulação
+        # o comportamento permanece idêntico (datetime.now()).
+        self.simulation_mode: bool = False
+        self.simulation_tick: int = 0
+        self.ticks_per_day: int = config.SIMULATION_TICKS_PER_DAY
         
         logger.info(
             f"RiskController inicializado: "
@@ -228,7 +235,7 @@ class RiskController:
         if self.daily_start_equity is None or config.is_close(self.daily_start_equity, 0.0):
             return
         
-        now = datetime.now()
+        now = self._now()
         
         # Calcular perda diária
         daily_loss_pct = (
@@ -276,6 +283,66 @@ class RiskController:
             self.trade_count_by_regime[old_regime] = 0
             logger.info(f"🔄 Resetado contador de {old_regime}: {old_count} → 0")
     
+    def _now(self) -> datetime:
+        """Data/hora efetiva: simulada em backtest, real em produção."""
+        if self.simulation_mode:
+            # 1 tick = 1 minuto de candle. Âncora fixa garante determinismo;
+            # ticks_per_day define a virada (1.440 minutos = 1 dia).
+            day, minute = divmod(self.simulation_tick, self.ticks_per_day)
+            return datetime(1970, 1, 1) + timedelta(days=day, minutes=minute)
+        return datetime.now()
+
+    def _today(self) -> date:
+        """Dia efetivo (simulado ou real)."""
+        return self._now().date()
+
+    @_locked
+    def set_simulation_tick(
+        self,
+        tick: int,
+        current_equity: Optional[float] = None,
+    ) -> bool:
+        """
+        Avança o relógio simulado e aplica a virada de dia do backtest.
+
+        Args:
+            tick: Índice do tick/candle (0-based).
+            current_equity: Equity atual, usada como baseline do novo dia.
+
+        Returns:
+            True se o dia simulado mudou (contadores foram resetados).
+        """
+        self.simulation_mode = True
+        self.simulation_tick = max(0, int(tick))
+
+        sim_day = self._today()
+        if sim_day == self.last_reset_day:
+            return False
+
+        self.last_reset_day = sim_day
+        self._apply_daily_reset(current_equity)
+        return True
+
+    @_locked
+    def _apply_daily_reset(self, current_equity: Optional[float]) -> None:
+        """Zera limites diários e contadores por regime."""
+        logger.info(
+            f"🔄 Reset diário de contadores "
+            f"(trades: {self.global_trade_count}, "
+            f"posições: {self.total_open_positions})"
+        )
+
+        self.global_trade_count = 0
+        self.trade_count_by_regime = defaultdict(int)
+        self.current_open_positions = defaultdict(int)
+        self.total_open_positions = 0
+        self.kill_switch_activated = False
+        self.kill_switch_until = None
+        self.new_high_counter = 0
+        if current_equity is not None:
+            self.daily_start_equity = current_equity
+            self.last_equity_high = current_equity
+
     @_locked
     def _reset_trade_counts_if_needed(self, current_equity: float) -> None:
         """
@@ -287,24 +354,12 @@ class RiskController:
         Args:
             current_equity: Equity atual
         """
-        today = datetime.now().date()
+        today = self._today()
         
         # Reset diário
         if today != self.last_reset_day:
-            logger.info(
-                f"🔄 Reset diário de contadores "
-                f"(trades: {self.global_trade_count}, "
-                f"posições: {self.total_open_positions})"
-            )
-            
-            self.global_trade_count = 0
-            self.trade_count_by_regime = defaultdict(int)
-            self.current_open_positions = defaultdict(int)
-            self.total_open_positions = 0
-            self.kill_switch_activated = False
-            self.kill_switch_until = None
-            self.daily_start_equity = current_equity
             self.last_reset_day = today
+            self._apply_daily_reset(current_equity)
         
         # Novo equity high - reset parcial
         if current_equity > self.last_equity_high:
@@ -363,7 +418,7 @@ class RiskController:
         
         # Verificar kill-switch
         if self.kill_switch_activated:
-            now = datetime.now()
+            now = self._now()
             if self.kill_switch_until and now < self.kill_switch_until:
                 remaining = (self.kill_switch_until - now).total_seconds() / 60
                 logger.debug(

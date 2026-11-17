@@ -58,9 +58,9 @@ DB_MAX_RETRIES = 3
 DEFAULT_STOP_LOSS_PCT = 0.008  # 0.8% max loss per trade (base fiduciária)
 DEFAULT_TAKE_PROFIT_PCT = 0.015  # 1.5% profit target (base fiduciária)
 MAX_POSITION_AGE_TICKS = {
-    "NORMAL": 30,      # 10 minutos a 20s/tick
-    "REDUCED": 15,     # 5 minutos
-    "PROTECT": 10      # 3.3 minutos
+    "NORMAL": 30,      # 30 minutos em candles de 1m
+    "REDUCED": 30,     # 30 minutos (antes 15 — cortava trades vencedores)
+    "PROTECT": 10      # 10 minutos
 }
 
 # Histerese da saída por risco de regime.
@@ -88,6 +88,10 @@ BASE_MAX_TRADES_BY_REGIME: Dict[str, int] = {
 }
 
 GLOBAL_TRADE_LIMIT = 25  # Máximo de trades por dia (aumentado de 8 para 25)
+
+# Um dia de negociação em candles de 1 minuto. Usado pelo relógio simulado
+# do RiskController para virar o dia em backtests (o tempo real não avança).
+SIMULATION_TICKS_PER_DAY = 1440
 
 # Position Limits
 MAX_OPEN_POSITIONS = {
