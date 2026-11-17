@@ -25,6 +25,8 @@ from strategy_unified import (
     BreakoutMomentumEngine,
     MeanReversionEngine,
     TrendFollowingEngine,
+    _previous_window,
+    _volatility_scale,
 )
 from simular import SimulationMode
 
@@ -147,6 +149,59 @@ class TestEngines:
             prices, 99.5, {"regime": "CONSOLIDACAO", "range_rel": 0.002}
         )
         assert high_vol["action"] == "NEUTRO"
+
+
+class TestHelpersDasEngines:
+    def test_previous_window_exclui_barra_atual(self):
+        prices = pd.Series([999.0, 100.0, 101.0, 102.0])
+        window = _previous_window(prices, 2)
+        assert list(window) == [100.0, 101.0]
+        assert 999.0 not in list(window)
+
+    def test_volatility_scale_limita_e_so_reduz(self):
+        assert _volatility_scale(0.002) == 1.0       # referência (SOL/BTC)
+        assert _volatility_scale(0.004) == 1.0       # mais volátil: sem alteração
+        assert _volatility_scale(0.0002) == 0.1      # piso para baixa volatilidade
+        assert _volatility_scale(0) == 1.0           # sem dados: neutro
+        assert _volatility_scale("invalido") == 1.0
+
+    def test_volatility_scale_e_monotonico_na_faixa_util(self):
+        escalas = [_volatility_scale(v) for v in (0.0002, 0.0004, 0.001, 0.002)]
+        assert escalas == sorted(escalas)
+        assert all(0.1 <= s <= 1.0 for s in escalas)
+
+
+class TestConfirmacaoConsolidacao:
+    def test_consolidacao_conta_confirmacao_e_aceita_dois_lados(self, monkeypatch):
+        monkeypatch.setattr(config, "TREND_CONFIRMATION_TICKS", 2)
+        tracker = TrendConfirmationTracker()
+        suggestion = {
+            "action": "COMPRA", "confidence": 0.7,
+            "engine": "MeanReversion",
+        }
+
+        assert tracker.update("SIM", "CONSOLIDACAO") == 1
+        filtered, reason = tracker.apply_filter(
+            "SIM", "CONSOLIDACAO", suggestion
+        )
+        assert reason is None
+        assert filtered["action"] == "COMPRA"
+
+        venda = dict(suggestion, action="VENDA")
+        filtered, reason = tracker.apply_filter("SIM", "CONSOLIDACAO", venda)
+        assert reason is None
+
+    def test_regime_oposto_continua_bloqueado(self, monkeypatch):
+        monkeypatch.setattr(config, "TREND_CONFIRMATION_TICKS", 1)
+        tracker = TrendConfirmationTracker()
+        tracker.update("SIM", "TENDENCIA_BAIXA")
+        _, reason = tracker.apply_filter(
+            "SIM",
+            "TENDENCIA_BAIXA",
+            {"action": "COMPRA", "confidence": 0.9, "engine": "TrendFollowing"},
+        )
+        assert reason is not None
+        assert "não confirma" in reason
 
 
 class TestParidadeConfiguracao:

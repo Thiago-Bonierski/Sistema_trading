@@ -28,6 +28,9 @@ from core.contracts import (
 )
 
 TREND_REGIMES = ("TENDENCIA_ALTA", "TENDENCIA_BAIXA")
+# CONSOLIDACAO também precisa de contador consecutivo: é o regime onde a
+# MeanReversion opera. TRANSICAO/ALTA_VOLATILIDADE continuam zerando o contador.
+CONFIRMABLE_REGIMES = TREND_REGIMES + ("CONSOLIDACAO",)
 VOLATILE_REGIMES = ("TRANSICAO", "ALTA_VOLATILIDADE")
 DIRECTIONAL_ACTIONS = ("COMPRA", "VENDA")
 
@@ -54,7 +57,7 @@ class TrendConfirmationTracker:
 
     def update(self, symbol: str, regime: str) -> int:
         """Atualiza e retorna o contador de confirmações consecutivas."""
-        if regime not in TREND_REGIMES:
+        if regime not in CONFIRMABLE_REGIMES:
             self.counts[symbol] = 0
             self.last_regime[symbol] = None
             return 0
@@ -93,18 +96,28 @@ class TrendConfirmationTracker:
             return suggestion, None
 
         required_ticks = getattr(config, "TREND_CONFIRMATION_TICKS", 2)
+        if regime == "CONSOLIDACAO":
+            # Janelas de CONSOLIDACAO duram poucos ticks em 1m. Exigir a
+            # mesma confirmação de tendência eliminava ~78% dos sinais de
+            # MeanReversion; o desvio de banda já é o filtro do ruído.
+            required_ticks = 1
         confirmation_count = self.counts.get(symbol, 0)
-        expected_regime = (
-            "TENDENCIA_ALTA" if action == "COMPRA" else "TENDENCIA_BAIXA"
+        # Em CONSOLIDACAO a MeanReversion opera contra a média: os dois
+        # lados são válidos. A confirmação por ticks consecutivos do regime
+        # continua valendo, evitando entrar em ruído de 1 tick.
+        expected_regimes = (
+            ("TENDENCIA_ALTA", "CONSOLIDACAO")
+            if action == "COMPRA"
+            else ("TENDENCIA_BAIXA", "CONSOLIDACAO")
         )
 
-        if regime != expected_regime:
+        if regime not in expected_regimes:
             filtered = suggestion.copy()
             filtered["action"] = "NEUTRO"
             filtered["confidence"] = 0.0
             filtered["details"] = (
                 f"Sinal {action} bloqueado: regime {regime} "
-                f"não confirma {expected_regime}"
+                f"não confirma {'/'.join(expected_regimes)}"
             )
             filtered["engine"] = "TrendConfirmationFilter"
             return filtered, "regime não confirma ação"

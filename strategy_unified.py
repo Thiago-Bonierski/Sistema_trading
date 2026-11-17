@@ -164,6 +164,41 @@ class TrendFollowingEngine(BaseStrategyEngine):
         }
 
 
+# Amplitude de referência (SOLBRL 1m). Thresholds são escalados pela
+# amplitude real para que a mesma calibração sirva a BTC e a USDT/BRL,
+# cuja volatilidade é ~6x menor.
+VOL_REFERENCE_RANGE = 0.002
+
+
+def _volatility_scale(range_rel: float) -> float:
+    """
+    Fator em [0.1, 1.0]: só reduz limiares em ativos de baixa volatilidade.
+
+    Ativos voláteis (SOL/BTC) mantêm a calibração base; USDT/BRL (~6x mais
+    calmo) recebe limiares menores para continuar operando.
+    """
+    try:
+        value = float(range_rel)
+    except (TypeError, ValueError):
+        return 1.0
+    if value <= 0:
+        return 1.0
+    return max(0.1, min(1.0, value / VOL_REFERENCE_RANGE))
+
+
+def _previous_window(prices: pd.Series, n: int = 10) -> pd.Series:
+    """
+    Retorna as N barras anteriores à atual.
+
+    As séries chegam com o preço atual na posição 0. Incluí-lo na janela
+    torna um rompimento matematicamente impossível (current > max(window))
+    e dilui o desvio da reversão à média.
+    """
+    if len(prices) > n:
+        return prices.iloc[1:n + 1]
+    return prices.iloc[:n]
+
+
 class MeanReversionEngine(BaseStrategyEngine):
     """
     Engine de retorno à média.
@@ -206,10 +241,18 @@ class MeanReversionEngine(BaseStrategyEngine):
         Returns:
             Sugestão de trading
         """
-        # Calcular média de curto prazo
-        media_curta = prices.iloc[:10].mean()
+        # Média das 10 barras anteriores (exclui o preço atual).
+        media_curta = float(_previous_window(prices, 10).mean())
+        if media_curta <= 0:
+            return {
+                "action": "NEUTRO",
+                "confidence": 0.30,
+                "engine": self.name,
+                "reason": "Sem base histórica válida",
+            }
         distancia = current_price - media_curta
-        largura = media_curta * self.band_width
+        scale = _volatility_scale(regime_metrics.get("range_rel", 0.0))
+        largura = media_curta * self.band_width * scale
         
         # OVERSOLD - abaixo da banda inferior
         if distancia < -largura:
@@ -291,14 +334,26 @@ class BreakoutMomentumEngine(BaseStrategyEngine):
         Returns:
             Sugestão de trading
         """
-        # Calcular máxima e mínima recente
-        recent = prices.iloc[:10]
-        high = recent.max()
-        low = recent.min()
+        # Máxima/mínima das 10 barras ANTERIORES. Incluir a barra atual
+        # impedia qualquer rompimento: current_price nunca excede o próprio
+        # máximo da janela que o contém.
+        recent = _previous_window(prices, 10)
+        if recent.empty:
+            return {
+                "action": "NEUTRO",
+                "confidence": 0.28,
+                "engine": self.name,
+                "reason": "Sem base histórica válida",
+            }
+        high = float(recent.max())
+        low = float(recent.min())
         range_rel = regime_metrics.get("range_rel", 0.0)
+        scale = _volatility_scale(range_rel)
+        threshold = self.breakout_threshold * scale
+        min_range = self.min_range * scale
         
         # ROMPIMENTO DE ALTA
-        if current_price > high * (1 + self.breakout_threshold) and range_rel > self.min_range:
+        if current_price > high * (1 + threshold) and range_rel > min_range:
             logger.debug(
                 f"BreakoutMomentum: COMPRA - "
                 f"price={current_price:.2f} >> high={high:.2f}, "
@@ -312,7 +367,7 @@ class BreakoutMomentumEngine(BaseStrategyEngine):
             }
         
         # ROMPIMENTO DE BAIXA
-        if current_price < low * (1 - self.breakout_threshold) and range_rel > self.min_range:
+        if current_price < low * (1 - threshold) and range_rel > min_range:
             logger.debug(
                 f"BreakoutMomentum: VENDA - "
                 f"price={current_price:.2f} << low={low:.2f}, "

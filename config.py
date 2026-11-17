@@ -169,12 +169,14 @@ EXHAUSTION_VOLATILITY_MOMENTUM_MAX = 0.012
 TREND_PRICE_THRESHOLD = 0.002     # 0.2% acima/abaixo da média (era 0,001)
 TREND_CONFIDENCE = 0.82
 
-# Mean Reversion — Valores base para fiduciárias
-MEAN_REVERSION_BAND_WIDTH = 0.003  # 0.3% de largura da banda (era 0,006)
+# Mean Reversion — Valores base para fiduciárias.
+# 0,10%: em 1m o desvio típico da janela anterior é ~0,085% (mediana) e
+# p90 ~0,20%; 0,3% gerava apenas 3 sinais em 236 ticks de CONSOLIDACAO.
+MEAN_REVERSION_BAND_WIDTH = 0.0010
 MEAN_REVERSION_CONFIDENCE = 0.74
 
 # Breakout Momentum — Valores base para fiduciárias
-BREAKOUT_THRESHOLD = 0.0015         # 0.15% acima máximo/abaixo mínimo (era 0,003)
+BREAKOUT_THRESHOLD = 0.0010         # 0.10% acima máximo/abaixo mínimo (era 0,0015)
 BREAKOUT_MIN_RANGE = 0.0015         # Range mínimo necessário (era 0,003)
 BREAKOUT_CONFIDENCE = 0.68
 
