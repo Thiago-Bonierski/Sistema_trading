@@ -37,6 +37,7 @@ REPORTS_DIR = BASE_DIR / 'reports'
 SIMULATION_REPORTS_DIR = BASE_DIR / 'simulation_reports'
 ML_MODEL_PATH = BASE_DIR / 'ml_model.joblib'
 LOG_DIR = BASE_DIR / 'logs'
+RUNTIME_CONFIG_PATH = BASE_DIR / 'runtime_config.json'
 
 # Criar diretórios se não existirem
 for directory in [REPORTS_DIR, SIMULATION_REPORTS_DIR, LOG_DIR]:
@@ -134,6 +135,21 @@ VOLATILITY_RATIO_THRESHOLD = 1.2   # Volatilidade não excessiva
 CHAOS_VOLATILITY_THRESHOLD = 1.8   # Volatilidade muito alta
 CHAOS_RANGE_THRESHOLD = 0.003      # Amplitude alta (era 0,006)
 CHAOS_MOMENTUM_THRESHOLD = 0.005   # Momentum fraco (era 0,015)
+
+# ============================================================================
+# EXHAUSTION FILTER
+# ============================================================================
+
+# Thresholds do filtro de exaustão. Os valores abaixo preservam exatamente
+# o comportamento histórico (antes eram literais em exhaustion_filter.py) e
+# podem ser calibrados em tempo real pelo painel.
+EXHAUSTION_MIN_HISTORY = 12
+EXHAUSTION_MOMENTUM_HIGH = 0.025
+EXHAUSTION_DECELERATION_MIN = 0.006
+EXHAUSTION_WEAK_MOMENTUM = 0.008
+EXHAUSTION_RANGE_HIGH = 0.0045
+EXHAUSTION_VOLATILITY_RATIO_HIGH = 2.5
+EXHAUSTION_VOLATILITY_MOMENTUM_MAX = 0.012
 
 # ============================================================================
 # STRATEGY ENGINES

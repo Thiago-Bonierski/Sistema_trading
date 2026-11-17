@@ -11,6 +11,14 @@ __pycache__/
 *.json
 log.txt
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Exceto os manifests do painel
+!frontend/package.json
+!frontend/package-lock.json
+
 # Config sensível
 .env
 

@@ -604,6 +604,7 @@ def run_simulation(
     total_pnl = 0.0
     win_count = 0
     total_duration = 0
+    trades: List[Dict[str, Any]] = []
 
     last_kpi_time = 0
 
@@ -809,6 +810,26 @@ def run_simulation(
             regime_trades[entry_regime_name] = regime_trades.get(entry_regime_name, 0) + 1
             regime_pnl[entry_regime_name] = regime_pnl.get(entry_regime_name, 0.0) + pnl_amount
 
+            # Registro auditável do trade para o painel (lista completa)
+            trades.append({
+                "entry_tick": entry_tick,
+                "exit_tick": exit_tick,
+                "side": trade_result.get("side"),
+                "entry_price": trade_result.get("entry_price"),
+                "exit_price": trade_result.get("exit_price"),
+                "entry_regime": entry_regime_name,
+                "exit_regime": trade_result.get("exit_regime", regime),
+                "engine": entry_engine_name,
+                "confidence": entry_confidence,
+                "pnl": round(float(pnl_amount), 6),
+                "position_size": trade_result.get("position_size"),
+                "duration_ticks": trade_result.get("duration_ticks", 0),
+                "reason": trade_result.get("reason", "UNKNOWN"),
+                "ml_score": ml_score,
+                "result": "WIN" if pnl_amount >= 0 else "LOSS",
+                "mode": mode.value,
+            })
+
             # Salvar trade no banco separado de simulação
             try:
                 salvar_trade({
@@ -875,8 +896,11 @@ def run_simulation(
         'mode': mode.value,
         'ticks': ticks,
         'seed': seed,
+        'symbol': symbol,
         'data_source': data_source,
+        'initial_capital': initial_capital,
         'final_equity': equity_mgr.current_equity,
+        'total_pnl': round(total_pnl, 6),
         'total_return': equity_mgr.get_total_return(),
         'max_drawdown': equity_mgr.get_max_equity_drawdown(),
         'trade_statistics': trade_statistics,
@@ -884,12 +908,34 @@ def run_simulation(
         '_funnel_report': funnel_report,
         'engine_stats': engine_stats,
         'regime_stats': regime_stats,
+        'trades': trades,
     }
 
 
 # ============================================================================
 # SAVE SIMULATION REPORT
 # ============================================================================
+
+def _build_comparison(
+    research: Dict[str, Any],
+    paper: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Calcula o comparativo agregado RESEARCH vs PAPER_TRADING."""
+    research_trades = research['trade_statistics']['total_trades']
+    paper_trades = paper['trade_statistics']['total_trades']
+
+    return {
+        'trade_reduction_pct': (
+            (research_trades - paper_trades) / research_trades * 100
+            if research_trades else 0.0
+        ),
+        'equity_preservation_pct': (
+            paper['final_equity'] / research['final_equity'] * 100
+            if research['final_equity'] else 0.0
+        ),
+        'risk_control_passed': paper['max_drawdown'] < 0.25,
+    }
+
 
 def save_simulation_report(
     research: Dict[str, Any],
@@ -908,20 +954,7 @@ def save_simulation_report(
     report_dir = config.SIMULATION_REPORTS_DIR
     report_dir.mkdir(exist_ok=True)
 
-    research_trades = research['trade_statistics']['total_trades']
-    paper_trades = paper['trade_statistics']['total_trades']
-
-    comparison = {
-        'trade_reduction_pct': (
-            (research_trades - paper_trades) / research_trades * 100
-            if research_trades else 0.0
-        ),
-        'equity_preservation_pct': (
-            paper['final_equity'] / research['final_equity'] * 100
-            if research['final_equity'] else 0.0
-        ),
-        'risk_control_passed': paper['max_drawdown'] < 0.25,
-    }
+    comparison = _build_comparison(research, paper)
 
     report = {
         'timestamp': datetime.now().isoformat(),
@@ -944,6 +977,66 @@ def save_simulation_report(
         logger.info(f"Relatório salvo: {report_path} ({size_mb:.2f} MB)")
 
     return str(report_path)
+
+
+def run_dual_simulation(
+    *,
+    ticks: int = 10000,
+    initial_capital: float = config.INITIAL_CAPITAL,
+    seed: Optional[int] = None,
+    data_source: str = "synthetic",
+    symbol: str = "USD",
+    force_download: bool = False,
+    interval: str = "1m",
+    save_report: bool = True,
+) -> Dict[str, Any]:
+    """
+    Executa os dois modos (RESEARCH e PAPER_TRADING) e devolve o pacote
+    completo usado pela API e pela CLI.
+
+    Returns:
+        Dict com research, paper_trading, comparison e report_path.
+    """
+    research = run_simulation(
+        SimulationMode.RESEARCH,
+        ticks=ticks,
+        initial_capital=initial_capital,
+        seed=seed,
+        data_source=data_source,
+        symbol=symbol,
+        force_download=force_download,
+        interval=interval,
+    )
+    paper = run_simulation(
+        SimulationMode.PAPER_TRADING,
+        ticks=ticks,
+        initial_capital=initial_capital,
+        seed=seed,
+        data_source=data_source,
+        symbol=symbol,
+        force_download=force_download,
+        interval=interval,
+    )
+
+    report_path = (
+        save_simulation_report(research, paper) if save_report else None
+    )
+
+    return {
+        "research": research,
+        "paper_trading": paper,
+        "comparison": _build_comparison(research, paper),
+        "report_path": report_path,
+        "request": {
+            "ticks": ticks,
+            "initial_capital": initial_capital,
+            "seed": seed,
+            "data_source": data_source,
+            "symbol": symbol,
+            "interval": interval,
+            "force_download": force_download,
+        },
+    }
 
 
 # ============================================================================
@@ -1163,21 +1256,19 @@ def main():
     # Normalizar símbolo para consistência (ex.: btc -> BTC)
     args.symbol = args.symbol.strip().upper()
 
-    # Rodar ambos os modos
-    research_results = run_simulation(
-        SimulationMode.RESEARCH, ticks=args.ticks,
-        initial_capital=args.capital, seed=args.seed,
-        data_source=args.source, symbol=args.symbol,
+    # Rodar ambos os modos e salvar relatório
+    bundle = run_dual_simulation(
+        ticks=args.ticks,
+        initial_capital=args.capital,
+        seed=args.seed,
+        data_source=args.source,
+        symbol=args.symbol,
         force_download=args.refresh,
         interval=args.interval,
     )
-    paper_results = run_simulation(
-        SimulationMode.PAPER_TRADING, ticks=args.ticks,
-        initial_capital=args.capital, seed=args.seed,
-        data_source=args.source, symbol=args.symbol,
-        force_download=args.refresh,
-        interval=args.interval,
-    )
+    research_results = bundle["research"]
+    paper_results = bundle["paper_trading"]
+    report_path = bundle["report_path"]
 
     # Imprimir relatórios no terminal
     _print_summary(research_results, paper_results, args.seed)
@@ -1185,8 +1276,6 @@ def main():
     _print_engine_performance(research_results, paper_results)
     _print_regime_performance(research_results, paper_results)
 
-    # Salvar relatório JSON
-    report_path = save_simulation_report(research_results, paper_results)
     print(f'✅ Relatório JSON salvo: {report_path}\n')
 
 

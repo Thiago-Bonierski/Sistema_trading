@@ -78,7 +78,7 @@ def check_exhaustion(
         return False, ""
     
     # Dados insuficientes
-    if len(prices) < 12:
+    if len(prices) < config.EXHAUSTION_MIN_HISTORY:
         _update_cache(symbol, False)
         return False, ""
     
@@ -97,7 +97,10 @@ def check_exhaustion(
     deceleration = abs(previous_momentum) - abs(current_momentum)
     
     # CRITÉRIO 1: Momentum alto mas desacelerando
-    if abs(current_momentum) > 0.025 and deceleration > 0.006:
+    if (
+        abs(current_momentum) > config.EXHAUSTION_MOMENTUM_HIGH
+        and deceleration > config.EXHAUSTION_DECELERATION_MIN
+    ):
         reason = "Momentum alto mas desacelerando"
         logger.info(
             f"Exaustão detectada ({symbol}): {reason} "
@@ -108,7 +111,10 @@ def check_exhaustion(
     
     # CRITÉRIO 2: Rompimento com momentum fraco
     range_rel = regime_metrics.get("range_rel", 0.0)
-    if abs(current_momentum) < 0.008 and range_rel > 0.0045:
+    if (
+        abs(current_momentum) < config.EXHAUSTION_WEAK_MOMENTUM
+        and range_rel > config.EXHAUSTION_RANGE_HIGH
+    ):
         reason = "Rompimento potencial mas momentum fraco"
         logger.info(
             f"Exaustão detectada ({symbol}): {reason} "
@@ -119,7 +125,10 @@ def check_exhaustion(
     
     # CRITÉRIO 3: Alta volatilidade sem momentum consistente
     volatility_ratio = regime_metrics.get("volatility_ratio", 0.0)
-    if volatility_ratio > 2.5 and abs(current_momentum) < 0.012:
+    if (
+        volatility_ratio > config.EXHAUSTION_VOLATILITY_RATIO_HIGH
+        and abs(current_momentum) < config.EXHAUSTION_VOLATILITY_MOMENTUM_MAX
+    ):
         reason = "Volatilidade alta sem momentum confiável"
         logger.info(
             f"Exaustão detectada ({symbol}): {reason} "
