@@ -45,14 +45,15 @@ from ml_classifier import MLClassifier
 from position_manager import PositionManager
 from risk_control import RiskController
 from strategy_unified import StrategyOrchestrator
-from exhaustion_filter import check_exhaustion
+from exhaustion_filter import check_exhaustion, reset_exhaustion_state
+from core.contracts import DecisionContext, MarketEvent, OrderIntent
+from core.pipeline import DecisionPipeline, TrendConfirmationTracker
 from simulation_telemetry import (
     SimulationTelemetry,
     TradeRecord,
     Regime as TelemetryRegime,
     SignalSource as TelemetrySignalSource,
     create_default_raw_signals,
-    create_default_filter_details,
 )
 
 # Configurar logging
@@ -543,6 +544,33 @@ def run_simulation(
     # Estado de confirmação de tendência (paridade com monitor.py)
     trend_confirmation_count: Dict[str, int] = {symbol: 0, "SIM": 0}
     last_trend_regime: Dict[str, Optional[str]] = {symbol: None, "SIM": None}
+    trend_tracker = TrendConfirmationTracker(
+        counts=trend_confirmation_count,
+        last_regime=last_trend_regime,
+    )
+
+    # Núcleo único de decisão (o mesmo usado por monitor.py).
+    #
+    # A simulação gerencia o nível de agressividade explicitamente por modo
+    # (PAPER=REDUCED, RESEARCH=NORMAL) e preserva a semântica histórica do
+    # backtest: não atualiza drawdown nem reseta contadores por regime a
+    # cada mudança. O monitor mantém ambos habilitados (defaults do pipeline).
+    pipeline = DecisionPipeline(
+        orchestrator=orchestrator,
+        position_manager=position_mgr,
+        risk_controller=risk_ctrl,
+        equity_manager=equity_mgr,
+        classifier=classifier,
+        analyze_regime=analyze_regime,
+        check_exhaustion=check_exhaustion,
+        trend_tracker=trend_tracker,
+        update_drawdown=False,
+        reset_regime_counts=False,
+    )
+
+    # Estado de exaustão é cache de módulo; limpar garante que execuções
+    # consecutivas no mesmo processo sejam determinísticas.
+    reset_exhaustion_state(symbol)
 
     # Obter preços da fonte especificada
     data_source_enum = DataSource(data_source)
@@ -664,11 +692,12 @@ def run_simulation(
 
         prices_series_local = pd.Series(price_history) if price_history else pd.Series([price])
 
-        # Detectar regime com o módulo real (só se não for synthetic direto)
+        # Cadência de análise de regime do feed histórico. O pipeline aceita
+        # regime pré-computado para preservar a semântica do replay; feeds
+        # live deixam o pipeline calcular internamente.
         if data_source_enum != DataSource.SYNTHETIC and len(prices_series_local) >= config.MIN_HISTORY_FOR_REGIME:
             regime_info = analyze_regime(prices_series_local, symbol=symbol)
             regime = regime_info["regime"]
-            # Atualizar regime_metrics com os valores reais do analysis
             regime_metrics = {
                 "regime": regime,
                 "slope": regime_info.get("slope", 0.0),
@@ -677,225 +706,118 @@ def run_simulation(
                 "volatility_ratio": regime_info.get("volatility_ratio", 1.0),
             }
 
-        # Registrar tick na telemetry antes dos filtros
-        # Coletar sinais brutos das engines para o funil
-        # Primeiro executamos o orchestrator para ter o resultado final
-        # depois rastreamos
-
-        # Executar orquestrador de estratégias reais
-        resultado = orchestrator.evaluate(
+        # Decisão única: regime -> orquestrador -> filtros -> ML -> risco/posição
+        event = MarketEvent(
+            symbol=symbol,
             price=price,
+            timestamp=float(tick),
+            sequence=tick,
+            prices=prices_series_local,
             regime=regime,
             regime_metrics=regime_metrics,
-            prices=prices_series_local,
+            source=data_source_enum.value,
+        )
+        decision = pipeline.process(
+            event,
+            DecisionContext(symbol=symbol, position_symbol="SIM", tick=tick),
         )
 
-        # Capturar sinais brutos antes dos filtros para telemetry
-        raw_signals = create_default_raw_signals()
-        # Sobrescrever com o sinal do orchestrator
+        regime = decision.regime
+        resultado = decision.signal
         engine_name = resultado.get("engine", "ProtectFlat")
-        if engine_name in raw_signals:
-            raw_signals[engine_name] = {
-                "action": resultado.get("action", "NEUTRO"),
-                "confidence": resultado.get("confidence", 0.0),
-                "engine": engine_name,
+        ml_score = decision.ml_score
+
+        # Sinal bruto do orquestrador (antes dos filtros) para o funil
+        raw_signals = create_default_raw_signals()
+        raw_engine_name = decision.raw_signal.get("engine", "ProtectFlat")
+        if raw_engine_name in raw_signals:
+            raw_signals[raw_engine_name] = {
+                "action": decision.raw_signal.get("action", "NEUTRO"),
+                "confidence": decision.raw_signal.get("confidence", 0.0),
+                "engine": raw_engine_name,
             }
 
-        # Atualizar confirmação de tendência (paridade com monitor.py)
-        if regime in ("TENDENCIA_ALTA", "TENDENCIA_BAIXA"):
-            if last_trend_regime.get("SIM") == regime:
-                trend_confirmation_count["SIM"] = trend_confirmation_count.get("SIM", 0) + 1
-            else:
-                last_trend_regime["SIM"] = regime
-                trend_confirmation_count["SIM"] = 1
-        else:
-            trend_confirmation_count["SIM"] = 0
-            last_trend_regime["SIM"] = None
-
-        # Filtro de confirmação de tendência (mesmo do monitor)
-        action = resultado.get("action", "NEUTRO")
-        filter_details = create_default_filter_details()
-
-        if action in ("COMPRA", "VENDA"):
-            required_ticks = getattr(config, "TREND_CONFIRMATION_TICKS", 2)
-            confirmation_count = trend_confirmation_count.get("SIM", 0)
-            expected = "TENDENCIA_ALTA" if action == "COMPRA" else "TENDENCIA_BAIXA"
-
-            if regime != expected:
-                resultado["action"] = "NEUTRO"
-                resultado["confidence"] = 0.0
-                resultado["details"] = f"Sinal {action} bloqueado: regime {regime} não confirma {expected}"
-                resultado["engine"] = "TrendConfirmationFilter"
-                filter_details["trend_confirmation"] = {
-                    "blocked": True,
-                    "reason": "regime não confirma ação",
-                }
-            elif position_mgr.get_position("SIM") is not None:
-                # Slot de posição ocupado - não pode entrar em nova posição
-                filter_details["position_slot"] = {
-                    "blocked": True,
-                    "reason": "slot_ocupado",
-                }
-            elif confirmation_count < required_ticks:
-                resultado["action"] = "NEUTRO"
-                resultado["confidence"] = 0.0
-                resultado["details"] = (
-                    f"Aguardando confirmação de tendência ({confirmation_count}/{required_ticks})"
-                )
-                resultado["engine"] = "TrendConfirmationFilter"
-                filter_details["trend_confirmation"] = {
-                    "blocked": True,
-                    "reason": f"confirmação insuficiente ({confirmation_count}/{required_ticks})",
-                }
-
-        # Guarda explícito: nunca abrir nova posição com ProtectFlat ou regimes voláteis/transição
-        if resultado.get("action") in ("COMPRA", "VENDA"):
-            if resultado.get("engine") == "ProtectFlat" or regime in ("TRANSICAO", "ALTA_VOLATILIDADE"):
-                resultado["action"] = "NEUTRO"
-                resultado["confidence"] = 0.0
-                resultado["details"] = "Entrada bloqueada: ProtectFlat/regime volátil ou transição"
-                if resultado.get("engine") != "ProtectFlat":
-                    resultado["engine"] = "TrendConfirmationFilter"
-                filter_details["trend_confirmation"] = {
-                    "blocked": True,
-                    "reason": "protectflat_ou_regime_volatil_transicao",
-                }
-
-        # Filtro de exaustão real (check_exhaustion)
-        if resultado.get("action") in ("COMPRA", "VENDA"):
-            exhausted, ex_reason = check_exhaustion(
-                prices=prices_series_local,
-                regime_metrics=regime_metrics,
-                suggestion=resultado,
-                symbol=symbol,
-            )
-            if exhausted:
-                resultado["action"] = "NEUTRO"
-                resultado["confidence"] = 0.0
-                resultado["details"] = f"Exaustão: {ex_reason}"
-                resultado["engine"] = "ExhaustionFilter"
-                filter_details["exhaustion"] = {
-                    "blocked": True,
-                    "reason": ex_reason,
-                }
-
-        # Filtro ML real (se treinado; caso contrário heurística)
-        ml_score = None
-        if classifier.is_trained():
-            resultado = classifier.filter_signal(resultado, regime_metrics)
-            ml_score = resultado.get("ml_score")
-            if resultado.get("action") == "NEUTRO" and resultado.get("ml_score") is not None:
-                filter_details["ml"] = {
-                    "blocked": True,
-                    "score": resultado.get("ml_score", 0.0),
-                    "threshold": config.ML_APPROVAL_THRESHOLD,
-                }
-
-        # Registrar decisão de tick na telemetry
+        # Telemetria do tick (detalhes por camada vêm do pipeline)
         telemetry.tick(
             price=price,
             regime=TelemetryRegime(regime) if regime in [r.value for r in TelemetryRegime] else TelemetryRegime.AGUARDANDO,
             raw_signals=raw_signals,
             filtered_signals={"final": resultado},
             final_action=resultado.get("action", "NEUTRO"),
-            final_engine=resultado.get("engine", "ProtectFlat"),
+            final_engine=engine_name,
             final_confidence=resultado.get("confidence", 0.0),
             ml_score=ml_score,
-            filter_details=filter_details,
+            filter_details=dict(decision.filter_details),
         )
 
-        # Avaliar posição (abrir/fechar/manter) — PositionManager oficial
-        position_decision = position_mgr.evaluate(
-            symbol="SIM",
-            signal=resultado["action"],
-            price=price,
-            regime=regime,
-            suggestion=resultado,
-            current_tick=tick,
-        )
+        # Fechamento: equity e risco já foram atualizados pelo pipeline
+        if decision.intent == OrderIntent.CLOSE and decision.trade_result:
+            trade_result = decision.trade_result
+            pnl_amount = trade_result["pnl"]
+            total_pnl += pnl_amount
+            trade_count += 1
+            total_duration += trade_result.get("duration_ticks", 0)
+            if pnl_amount >= 0:
+                win_count += 1
 
-        status_ia = position_decision["action"]
+            # Atribuição correta: usar metadados da abertura (trade_result)
+            entry_engine_name = trade_result.get("engine", engine_name)
+            entry_regime_name = trade_result.get("entry_regime", regime)
+            entry_confidence = trade_result.get("confidence", resultado.get("confidence", 0.0))
+            entry_tick = trade_result.get("entry_tick", tick - trade_result.get("duration_ticks", 0))
+            exit_tick = trade_result.get("exit_tick", tick)
 
-        # Rastrear bloqueio por risco (slot ocupado, limite global, etc.)
-        if status_ia == "NEUTRO" and position_decision.get("event") == "RISK_BLOCK":
-            filter_details["risk_controller"] = {
-                "blocked": True,
-                "reason": "risco_bloqueado",
-            }
+            try:
+                entry_regime_enum = TelemetryRegime(entry_regime_name)
+            except ValueError:
+                entry_regime_enum = TelemetryRegime.CONSOLIDACAO
+            try:
+                entry_engine_enum = TelemetrySignalSource(entry_engine_name)
+            except ValueError:
+                entry_engine_enum = TelemetrySignalSource.PROTECT_FLAT
+            try:
+                final_regime_enum = TelemetryRegime(regime)
+            except ValueError:
+                final_regime_enum = TelemetryRegime.CONSOLIDACAO
+            try:
+                final_engine_enum = TelemetrySignalSource(engine_name)
+            except ValueError:
+                final_engine_enum = TelemetrySignalSource.PROTECT_FLAT
 
-        if status_ia == "SAIR":
-            trade_result = position_decision.get("result")
-            if trade_result:
-                pnl_amount = trade_result["pnl"]
-                equity_mgr.update_equity(pnl_amount)
-                risk_ctrl.close_position("SIM")
-                total_pnl += pnl_amount
-                trade_count += 1
-                total_duration += trade_result.get("duration_ticks", 0)
-                if pnl_amount >= 0:
-                    win_count += 1
+            # Registrar na telemetry (entrada = abertura, final = fechamento)
+            trade_record = TradeRecord(
+                entry_tick=entry_tick,
+                exit_tick=exit_tick,
+                symbol="SIM",
+                regime_entry=entry_regime_enum,
+                engine_entry=entry_engine_enum,
+                confidence_entry=entry_confidence,
+                ml_score_entry=ml_score,
+                entry_price=trade_result.get("entry_price", price),
+                exit_price=trade_result.get("exit_price", price),
+                exit_reason=trade_result.get("reason", "UNKNOWN"),
+                pnl=pnl_amount,
+                duration_ticks=trade_result.get("duration_ticks", 0),
+                final_regime=final_regime_enum,
+                final_engine=final_engine_enum,
+            )
+            telemetry.record_trade(trade_record)
 
-                # Atribuição correta: usar metadados da abertura (trade_result)
-                entry_engine_name = trade_result.get("engine", engine_name)
-                entry_regime_name = trade_result.get("entry_regime", regime)
-                entry_confidence = trade_result.get("confidence", resultado.get("confidence", 0.0))
-                entry_tick = trade_result.get("entry_tick", tick - trade_result.get("duration_ticks", 0))
-                exit_tick = trade_result.get("exit_tick", tick)
+            # Contadores por engine e regime de ENTRADA (origem do trade)
+            engine_trades[entry_engine_name] = engine_trades.get(entry_engine_name, 0) + 1
+            engine_pnl[entry_engine_name] = engine_pnl.get(entry_engine_name, 0.0) + pnl_amount
+            regime_trades[entry_regime_name] = regime_trades.get(entry_regime_name, 0) + 1
+            regime_pnl[entry_regime_name] = regime_pnl.get(entry_regime_name, 0.0) + pnl_amount
 
-                try:
-                    entry_regime_enum = TelemetryRegime(entry_regime_name)
-                except ValueError:
-                    entry_regime_enum = TelemetryRegime.CONSOLIDACAO
-                try:
-                    entry_engine_enum = TelemetrySignalSource(entry_engine_name)
-                except ValueError:
-                    entry_engine_enum = TelemetrySignalSource.PROTECT_FLAT
-                try:
-                    final_regime_enum = TelemetryRegime(regime)
-                except ValueError:
-                    final_regime_enum = TelemetryRegime.CONSOLIDACAO
-                try:
-                    final_engine_enum = TelemetrySignalSource(engine_name)
-                except ValueError:
-                    final_engine_enum = TelemetrySignalSource.PROTECT_FLAT
-
-                # Registrar na telemetry (entrada = abertura, final = fechamento)
-                trade_record = TradeRecord(
-                    entry_tick=entry_tick,
-                    exit_tick=exit_tick,
-                    symbol="SIM",
-                    regime_entry=entry_regime_enum,
-                    engine_entry=entry_engine_enum,
-                    confidence_entry=entry_confidence,
-                    ml_score_entry=ml_score,
-                    entry_price=trade_result.get("entry_price", price),
-                    exit_price=trade_result.get("exit_price", price),
-                    exit_reason=trade_result.get("reason", "UNKNOWN"),
-                    pnl=pnl_amount,
-                    duration_ticks=trade_result.get("duration_ticks", 0),
-                    final_regime=final_regime_enum,
-                    final_engine=final_engine_enum,
-                )
-                telemetry.record_trade(trade_record)
-
-                # Contadores por engine e regime de ENTRADA (origem do trade)
-                engine_trades[entry_engine_name] = engine_trades.get(entry_engine_name, 0) + 1
-                engine_pnl[entry_engine_name] = engine_pnl.get(entry_engine_name, 0.0) + pnl_amount
-                regime_trades[entry_regime_name] = regime_trades.get(entry_regime_name, 0) + 1
-                regime_pnl[entry_regime_name] = regime_pnl.get(entry_regime_name, 0.0) + pnl_amount
-
-                # Salvar trade no banco separado de simulação
-                try:
-                    salvar_trade({
-                        **trade_result,
-                        "symbol": "SIM_SIMULATION",
-                        "aggressiveness": risk_ctrl.aggressiveness_level,
-                    })
-                except Exception as e:
-                    logger.debug(f"Não foi possível salvar trade de simulação: {e}")
-
-        elif status_ia in ("COMPRA", "VENDA"):
-            risk_ctrl.register_trade("SIM", regime, status_ia)
+            # Salvar trade no banco separado de simulação
+            try:
+                salvar_trade({
+                    **trade_result,
+                    "symbol": "SIM_SIMULATION",
+                    "aggressiveness": risk_ctrl.aggressiveness_level,
+                })
+            except Exception as e:
+                logger.debug(f"Não foi possível salvar trade de simulação: {e}")
 
         # Decrementar cooldowns do risk controller a cada tick
         risk_ctrl.tick()

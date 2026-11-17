@@ -42,6 +42,8 @@ from risk_control import RiskController
 from position_manager import PositionManager
 from exhaustion_filter import check_exhaustion
 from kpis import KPITracker
+from core.contracts import DecisionContext, MarketEvent, OrderIntent
+from core.pipeline import DecisionPipeline, TrendConfirmationTracker
 
 # Configurar logging
 logger = setup_logging("monitor", config.LOG_LEVEL)
@@ -87,6 +89,29 @@ risk_controller = RiskController()
 equity_manager = EquityManager(initial_capital=config.INITIAL_CAPITAL)
 position_manager = PositionManager(equity_manager, risk_controller)
 kpi_tracker = KPITracker()
+
+# Estado de confirmação compartilhado com o pipeline. Os dicionários
+# históricos acima continuam sendo a fonte de verdade para compatibilidade
+# (testes e consumidores externos leem/limpam esses globais).
+trend_tracker = TrendConfirmationTracker(
+    counts=trend_confirmation_count,
+    last_regime=last_trend_regime,
+)
+
+# Núcleo único de decisão. Os lambdas resolvem os nomes globais em tempo
+# de chamada, preservando o comportamento de monkeypatch do módulo.
+decision_pipeline = DecisionPipeline(
+    orchestrator=orchestrator,
+    position_manager=position_manager,
+    risk_controller=risk_controller,
+    equity_manager=equity_manager,
+    classifier=classifier,
+    analyze_regime=lambda prices, symbol: analyze_regime(prices, symbol=symbol),
+    check_exhaustion=lambda prices, regime_metrics, suggestion, symbol: check_exhaustion(
+        prices, regime_metrics, suggestion, symbol
+    ),
+    trend_tracker=trend_tracker,
+)
 
 
 # ============================================================================
@@ -308,6 +333,7 @@ def handle_data_gap(
     ultimo_regime[symbol] = None
     trend_confirmation_count[symbol] = 0
     last_trend_regime[symbol] = None
+    decision_pipeline.reset_state(symbol)
     
 
 def ensure_reports_dir() -> Path:
@@ -549,8 +575,8 @@ def update_trend_confirmation(symbol: str, regime: str) -> int:
     """
     Atualiza contador de confirmação de tendência.
 
-    A ideia é exigir que TENDENCIA_ALTA ou TENDENCIA_BAIXA apareça
-    por alguns ciclos consecutivos antes de permitir nova entrada.
+    Delega para o estado compartilhado com o `DecisionPipeline`, mantendo
+    o contrato histórico de `monitor.py` (globais e assinatura).
 
     Args:
         symbol: Símbolo do ativo.
@@ -559,18 +585,7 @@ def update_trend_confirmation(symbol: str, regime: str) -> int:
     Returns:
         Número atual de confirmações consecutivas.
     """
-    if regime not in ("TENDENCIA_ALTA", "TENDENCIA_BAIXA"):
-        trend_confirmation_count[symbol] = 0
-        last_trend_regime[symbol] = None
-        return 0
-
-    if last_trend_regime[symbol] == regime:
-        trend_confirmation_count[symbol] += 1
-    else:
-        last_trend_regime[symbol] = regime
-        trend_confirmation_count[symbol] = 1
-
-    return trend_confirmation_count[symbol]
+    return trend_tracker.update(symbol, regime)
 
 
 def apply_trend_confirmation_filter(
@@ -590,56 +605,28 @@ def apply_trend_confirmation_filter(
     Bloqueia apenas nova COMPRA/VENDA quando a tendência ainda não
     apareceu por ciclos suficientes.
     """
-    action = suggestion.get("action", "NEUTRO")
+    has_position = position_manager.get_position(symbol) is not None
+    filtered, reason = trend_tracker.apply_filter(
+        symbol=symbol,
+        regime=regime,
+        suggestion=suggestion,
+        has_position=has_position,
+    )
 
-    if action not in ("COMPRA", "VENDA"):
-        return suggestion
+    if reason and "confirmação" in reason:
+        logger.info(f"⏳ {symbol}: entrada bloqueada por confirmação ({reason})")
 
-    # Se já existe posição aberta, não bloquear.
-    # A posição precisa continuar sendo gerenciada normalmente.
-    if position_manager.get_position(symbol) is not None:
-        return suggestion
-
-    required_ticks = getattr(config, "TREND_CONFIRMATION_TICKS", 2)
-    confirmation_count = trend_confirmation_count.get(symbol, 0)
-
-    # Garantir alinhamento entre ação e regime
-    expected_regime = "TENDENCIA_ALTA" if action == "COMPRA" else "TENDENCIA_BAIXA"
-
-    if regime != expected_regime:
-        filtered = suggestion.copy()
-        filtered["action"] = "NEUTRO"
-        filtered["confidence"] = 0.0
-        filtered["details"] = (
-            f"Sinal {action} bloqueado: regime {regime} não confirma {expected_regime}"
-        )
-        filtered["engine"] = "TrendConfirmationFilter"
-        return filtered
-
-    if confirmation_count < required_ticks:
-        filtered = suggestion.copy()
-        filtered["action"] = "NEUTRO"
-        filtered["confidence"] = 0.0
-        filtered["details"] = (
-            f"Aguardando confirmação de tendência "
-            f"({confirmation_count}/{required_ticks})"
-        )
-        filtered["engine"] = "TrendConfirmationFilter"
-
-        logger.info(
-            f"⏳ {symbol}: entrada {action} bloqueada por confirmação "
-            f"({confirmation_count}/{required_ticks}) em {regime}"
-        )
-
-        return filtered
-
-    return suggestion
+    return filtered
 
 
 def process_symbol(symbol: str, tick_count: int) -> None:
     """
     Processa um símbolo individual.
-    
+
+    Este driver é responsável apenas por: obter cotação, carregar
+    histórico, tratar DATA_GAP, delegar a decisão ao `DecisionPipeline`
+    e executar os efeitos colaterais (persistência, telemetria, avisos).
+
     Args:
         symbol: Símbolo da moeda (USD, BTC, ETH, SOL)
         tick_count: Contador de ticks atual
@@ -651,11 +638,11 @@ def process_symbol(symbol: str, tick_count: int) -> None:
     except Exception as e:
         logger.error(f"Erro ao obter cotação de {symbol}: {e}")
         return
-    
+
     if not cotacao_data or 'preco' not in cotacao_data:
         logger.warning(f"Cotação inválida para {symbol}: {cotacao_data}")
         return
-    
+
     preco = float(cotacao_data['preco'])
     horario = cotacao_data.get('horario', time.strftime("%H:%M:%S"))
     nome_db = symbol
@@ -676,161 +663,62 @@ def process_symbol(symbol: str, tick_count: int) -> None:
             )
             return
     logger.debug(f"{symbol}: R$ {preco:.2f}")
-    
-    # Analisar tendência e regime
+
+    # Histórico recente (após o último DATA_GAP)
     historico_precos = analisar_tendencia(nome_db, preco)
-    regime_info = analyze_regime(historico_precos, symbol=nome_db)
-    regime = regime_info["regime"]
 
-    # Atualizar confirmação de tendência
-    confirmation_count = update_trend_confirmation(nome_db, regime)
-    
-    # Detectar mudança de regime
-    if regime != ultimo_regime[nome_db]:
-        log_regime_change(logger, symbol, ultimo_regime[nome_db], regime)
-        
-        # Reset contadores do regime antigo
-        if ultimo_regime[nome_db]:
-            risk_controller.reset_regime_counts(ultimo_regime[nome_db])
-        
-        ultimo_regime[nome_db] = regime
-    
-    # Atualizar drawdown no risk controller
-    equity_dd = equity_manager.get_current_drawdown()
-    risk_controller.update_drawdown(equity_dd, equity_manager.current_equity)
-
-    # Executar estratégia
-    resultado = orchestrator.evaluate(
-        price=preco,
-        regime=regime,
-        regime_metrics=regime_info,
-        prices=historico_precos
-    )
-
-    # Aplicar filtro de confirmação de tendência antes do ML e antes da posição
-    resultado = apply_trend_confirmation_filter(
+    # Núcleo único de decisão (mesma cadeia usada pela simulação)
+    event = MarketEvent(
         symbol=nome_db,
-        regime=regime,
-        suggestion=resultado
+        price=preco,
+        timestamp=float(collected_at_epoch),
+        sequence=tick_count,
+        prices=historico_precos,
+        source="live",
     )
-
-    # Verificar exaustão (usando a análise real, não um cache vazio)
-    # A verificação acontece depois da sugestão da estratégia, pois precisa
-    # do regime_metrics e da ação para aplicar os critérios de exaustão.
-    # Bloqueia ANTES de abrir posição; saídas de posições existentes não
-    # são afetadas pelo filtro de exaustão.
-    if resultado.get("action") in ("COMPRA", "VENDA"):
-        exhausted, ex_reason = check_exhaustion(
-            prices=historico_precos,
-            regime_metrics=regime_info,
-            suggestion=resultado,
+    decision = decision_pipeline.process(
+        event,
+        DecisionContext(
             symbol=nome_db,
-        )
-        if exhausted:
-            logger.info(
-                f"🛑 {symbol}: entrada {resultado['action']} bloqueada por "
-                f"exaustão ({ex_reason})"
-            )
-            filtrado = resultado.copy()
-            filtrado["action"] = "NEUTRO"
-            filtrado["confidence"] = 0.0
-            filtrado["details"] = f"Exaustão: {ex_reason}"
-            filtrado["engine"] = "ExhaustionFilter"
-            filtrado["ml_score"] = None
-            resultado = filtrado
+            position_symbol=nome_db,
+            tick=tick_count,
+        ),
+    )
+    regime = decision.regime
 
-            salvar_cotacao(
-                horario=horario,
-                preco=preco,
-                moeda=nome_db,
-                recomendacao="NEUTRO",
-                regime=regime,
-                engine="ExhaustionFilter",
-                confidence=0.0,
-                details=f"Exaustão: {ex_reason}",
-                ml_score=None,
-                collected_at_epoch=collected_at_epoch,
-            )
-            # Registrar sinal bloqueado no KPI
-            kpi_tracker.record_signal(
-                symbol=symbol,
-                regime=regime,
-                engine="ExhaustionFilter",
-                action="NEUTRO",
-                confidence=0.0,
-            )
-            # Pular avaliação de posição (nenhuma entrada)
-            status_ia = "NEUTRO"
-            ultimo_status[nome_db] = status_ia
-            logger.info(
-                f"✅ {nome_db}: R$ {preco:.2f} | {status_ia} | {regime} | "
-                f"Engine: {resultado.get('engine', 'N/A')} | "
-                f"Conf: {resultado.get('confidence', 0.0):.2f} | "
-                f"Equity: R$ {equity_manager.current_equity:,.2f}"
-            )
-            return
+    # Detectar mudança de regime (o reset de contadores é do pipeline)
+    if decision.regime_changed:
+        log_regime_change(logger, symbol, decision.previous_regime, regime)
 
-    # Aplicar filtro ML se disponível
-    if classifier.is_trained():
-        resultado = classifier.filter_signal(resultado, regime_info)
-    
-    # Registrar no KPI tracker
+    ultimo_regime[nome_db] = regime
+
+    # Registrar no KPI tracker o sinal filtrado (antes da posição)
     kpi_tracker.record_signal(
         symbol=symbol,
         regime=regime,
-        engine=resultado.get("engine", "N/A"),
-        action=resultado.get("action", "NEUTRO"),
-        confidence=resultado.get("confidence", 0.0),
+        engine=decision.signal.get("engine", "N/A"),
+        action=decision.signal.get("action", "NEUTRO"),
+        confidence=decision.signal.get("confidence", 0.0),
     )
-    
-    # Avaliar posição (abrir/fechar/manter)
-    position_decision = position_manager.evaluate(
-        symbol=nome_db,
-        signal=resultado["action"],
-        price=preco,
-        regime=regime,
-        suggestion=resultado,
-        current_tick=tick_count,
-    )
-    
-    status_ia = position_decision["action"]
-    
-    # Processar decisão
-    if status_ia == "HOLD":
-        # Manter posição existente
-        position = position_decision.get("position")
-        if position:
-            status_ia = f"HOLD_{position.side}"
-    
-    elif status_ia == "SAIR":
-        # Fechar posição
-        trade_result = position_decision.get("result")
+
+    status_ia = decision.action
+
+    if decision.intent == OrderIntent.CLOSE:
+        # Fechamento: equity e risco já atualizados pelo pipeline
+        trade_result = decision.trade_result
         if trade_result:
-            # Atualizar equity
-            pnl_amount = trade_result["pnl"]
-            equity_manager.update_equity(pnl_amount)
-            
-            # Registrar no risk controller
-            risk_controller.close_position(nome_db)
-            
-            # Registrar no KPI tracker
             kpi_tracker.record_trade_result(trade_result)
-            
-            # Salvar no histórico
             salvar_trade_history(trade_result)
-            
-            # Log
             log_trade_execution(logger, trade_result)
-            
-            # Persistir estado vivo (posição fechada, equity e risco atualizados)
             persist_state()
-    
-    elif status_ia in ("COMPRA", "VENDA"):
-        # Nova posição aberta - registrar no risk controller
-        risk_controller.register_trade(nome_db, regime, status_ia)
-        # Persistir estado vivo (posição aberta)
+
+    elif decision.intent == OrderIntent.OPEN:
+        # Nova posição: risco já registrado pelo pipeline
         persist_state()
-    
+
+    elif decision.intent == OrderIntent.HOLD and decision.position_side:
+        status_ia = f"HOLD_{decision.position_side}"
+
     # Salvar cotação no banco
     salvar_cotacao(
         horario=horario,
@@ -838,17 +726,17 @@ def process_symbol(symbol: str, tick_count: int) -> None:
         moeda=nome_db,
         recomendacao=status_ia,
         regime=regime,
-        engine=resultado.get("engine", "N/A"),
-        confidence=resultado.get("confidence", 0.0),
-        details=resultado.get("details", ""),
-        ml_score=resultado.get("ml_score"),
+        engine=decision.signal.get("engine", "N/A"),
+        confidence=decision.signal.get("confidence", 0.0),
+        details=decision.signal.get("details", ""),
+        ml_score=decision.signal.get("ml_score"),
         collected_at_epoch=collected_at_epoch,
     )
-    
+
     # Notificar mudança de status
     if status_ia != ultimo_status[nome_db]:
         logger.info(f"📢 Mudança detectada em {nome_db}: {status_ia} ({regime})")
-        
+
         # Enviar mensagem para ações importantes
         if status_ia in ["COMPRA", "VENDA", "SAIR"]:
             try:
@@ -856,23 +744,23 @@ def process_symbol(symbol: str, tick_count: int) -> None:
                     f"🤖 RECOMENDAÇÃO ({nome_db}): {status_ia}\n"
                     f"Regime: {regime}\n"
                     f"Preço: R$ {preco:.2f}\n"
-                    f"Confiança: {resultado.get('confidence', 0.0):.2f}"
+                    f"Confiança: {decision.signal.get('confidence', 0.0):.2f}"
                 )
             except Exception as e:
                 logger.error(f"Erro ao enviar mensagem: {e}")
-        
+
         ultimo_status[nome_db] = status_ia
-    
+
     # Log de status
     logger.info(
         f"✅ {nome_db}: R$ {preco:.2f} | {status_ia} | {regime} | "
-        f"Engine: {resultado.get('engine', 'N/A')} | "
-        f"Conf: {resultado.get('confidence', 0.0):.2f} | "
+        f"Engine: {decision.signal.get('engine', 'N/A')} | "
+        f"Conf: {decision.signal.get('confidence', 0.0):.2f} | "
         f"Equity: R$ {equity_manager.current_equity:,.2f}"
     )
-    
+
     # Mostrar KPIs após fechamento de trade
-    if status_ia == "SAIR":
+    if decision.intent == OrderIntent.CLOSE:
         logger.info(f"📊 KPI SUMMARY: {kpi_tracker.summary()}")
 
 

@@ -1,0 +1,291 @@
+# Revisão Arquitetural Profunda — Sistema_trading
+**Data:** 2026-11-16  
+**Escopo analisado (leitura):** `app.py`, `monitor.py`, `simular.py`, `database.py`, `strategy_unified.py`, `ml_training.py`, `ml_classifier.py`, `features.py`, `market_regime.py`, `exhaustion_filter.py`, `position_manager.py`, `risk_control.py`, `equity.py`, `config.py`, `simulation_telemetry.py`, `logging_config.py`, `kpis.py`, testes e artefatos de configuração.  
+**Estado de referência:** versão estável no commit `d1804c7` (branch `master`), com suíte reportada/validada em 68 testes passando.  
+**Natureza deste documento:** parecer estratégico e técnico. **Nenhum arquivo de código foi modificado, criado (além deste relatório solicitado) ou removido.**
+
+---
+
+## 1) Crítica honesta da arquitetura atual
+
+### 1.1 O que está muito bem resolvido e deve ser mantido
+
+1. **Fonte única de verdade para estado vivo (SQLite) com contrato explícito**  
+   - `database.py` define e inicializa `positions`, `system_state` e `risk_state` como singletons/entidades persistidas, além de `cotacoes` e `trade_history` (`database.py`: schema e índices; `save_all_state`/`load_all_state`).  
+   - `monitor.py` implementa `restore_state()`, `persist_state()` e `get_state_snapshot()` sob `state_lock` (`RLock`), reduzindo inconsistências entre execução e leitura.  
+   - **Manter:** persistência transacional do estado, restauração no boot e snapshots imutáveis/consistentes para consumo externo (dashboard/API).
+
+2. **Separação clara de responsabilidades no núcleo de domínio**  
+   - `strategy_unified.py`: engines especializadas (`TrendFollowing`, `MeanReversion`, `BreakoutMomentum`, `ProtectFlat`) + `StrategyOrchestrator` com seleção por regime e fallback defensivo.  
+   - `market_regime.py`: classificação de regime com métricas e sensibilidade por ativo (ex.: multiplicador de volatilidade cripto).  
+   - `exhaustion_filter.py`: filtro de exaustão desacoplado da geração de sinal.  
+   - `position_manager.py`, `risk_control.py`, `equity.py`: ciclo de vida de posição, governança de risco/agressividade/kill-switch e contabilidade de equity separados.  
+   - **Manter:** domínio modular, parâmetros centralizados em `config.py`, e engines/filtros testáveis de forma relativamente isolada.
+
+3. **Contrato único de features e disciplina anti-leakage no ML**  
+   - `features.py` centraliza `FEATURE_COLUMNS`/construção de features; `ml_training.py` treina a partir de histórico com split temporal/estratificado e escrita atômica do modelo (`.tmp` + `os.replace`); `ml_classifier.py` faz hot-reload e fallback heurístico quando modelo indisponível, agora com `RLock` para leituras/reloads concorrentes.  
+   - **Manter:** contrato compartilhado treino/inferência, persistência atômica de artefatos e degradação graciosa.
+
+4. **Simulação orientada a componentes reais e telemetria de funil**  
+   - `simular.py` reutiliza orquestrador, filtros, `PositionManager`, `RiskController`, `EquityManager` e `MLClassifier`; suporta `synthetic|db|api` (Binance pública, cache local) e CLI reprodutível.  
+   - `simulation_telemetry.py` provê rastreabilidade tick-a-tick e relatórios de funil/performance, com correção recente de atribuição por metadados de abertura (`engine_entry/regime_entry`) vs. estado final de saída.  
+   - **Manter:** paridade conceitual com produção, reprodutibilidade (`seed`) e telemetria auditável como base de pesquisa.
+
+5. **Camada operacional mínima viável e observabilidade básica**  
+   - `app.py` (Flask) expõe dashboard/KPIs/controle; `logging_config.py` padroniza logs; `kpis.py` agrega métricas; `config.py` concentra knobs operacionais e de risco.  
+   - **Manter:** simplicidade de operação local, configuração centralizada e trilhas de auditoria (logs/DB/relatórios).
+
+### 1.2 Principais gargalos estruturais, acoplamentos ocultos e limitações de escala
+
+1. **Modelo de concorrência baseado em threads + estado global compartilhado**  
+   - `monitor.py` mantém estado global em módulo (`ultimo_status/regime`, contadores de confirmação, instâncias singleton de `orchestrator/classifier/risk_controller/equity_manager/position_manager/kpi_tracker`, `stop_event`, `state_lock`). `app.py` importa e aciona laços/objetos do monitor em threads daemon.  
+   - `database.py` usa lock global de processo para **toda** operação de conexão/IO, serializando leituras e escritas.  
+   - **Impacto:** contenção sob carga, risco de latências no dashboard durante escrita, dificuldade de raciocínio sobre ordering/interleaving e limites naturais para múltiplos símbolos/estratégias em tempo real. Escala vertical/horizontal limitada.
+
+2. **Acoplamento implícito entre camadas (UI/API ↔ loop ↔ domínio ↔ persistência)**  
+   - `app.py` conhece detalhes internos do monitor e de componentes de domínio; `monitor.py` orquestra coleta, análise, persistência, notificação e políticas em um único laço; funções utilitárias e efeitos colaterais misturados.  
+   - `simular.py` replica parte relevante da lógica de decisão/filtros/controle de fluxo (e recentemente convergiu em paridade), mas ainda é um caminho paralelo com risco de deriva futura.  
+   - **Impacto:** custo alto de evolução, regressões de paridade, testes de integração mais frágeis e dificuldade para plugar novos “alimentadores” (WebSocket, replay, corretora) sem tocar o núcleo.
+
+3. **Ingestão por polling HTTP e granularidade temporal rígida**  
+   - Coleta baseada em `pegar_cotacao`/AwesomeAPI com intervalo fixo (`MONITORING_INTERVAL_SECONDS`, default 20s em `config.py`) e tratamento de gaps reativo.  
+   - **Impacto:** latência estrutural, perda de microestrutura de mercado, maior sensibilidade a falhas intermitentes de API e desalinhamento com fontes de backtest (ex.: candles Binance no simulador) — comparabilidade limitada entre pesquisa e produção.
+
+4. **Modelo de dados e execução simplificado para um universo pequeno e síncrono**  
+   - Estado/limites/cooldowns e parte da telemetria assumem símbolos conhecidos e processamento sequencial por ciclo; sem barramento de eventos, sem filas, sem idempotência formal de eventos, sem separação entre “clock de mercado” e “clock de sistema”.  
+   - **Impacto:** evolução para multiativo intensivo, múltiplos timeframes, estratégias concorrentes ou execução em corretora exigirá refatoração estrutural.
+
+5. **Persistência SQLite como gargalo de throughput e de topologia**  
+   - Segurança por lock global é correta para consistência local simples, mas não explora WAL/busy timeouts/estratégias de leitura concorrente; sem versionamento/migrações formais de schema; JSON serializado em colunas de estado.  
+   - **Impacto:** contenção em picos, acoplamento forte a um nó único, dificuldade para observabilidade/analytics avançados e para reprocessamento histórico eficiente.
+
+6. **Fronteiras de execução/risco ainda não preparadas para trading real**  
+   - Não há abstração de broker/exchange, modelo de ordens (parciais, rejeições, slippage/fees realistas no core unificado), reconciliação de posições com fonte externa, nem segregação estrita paper/live com garantias operacionais.  
+   - **Impacto:** caminho para `ccxt`/testnet/real exigirá mais que um adaptador superficial se o núcleo não for orientado a eventos e a contratos de execução.
+
+7. **Observabilidade e governança de modelo em nível “bom, porém básico”**  
+   - Logs e funil existem, mas faltam métricas estruturadas (latência por etapa, taxas por motivo normalizadas, saúde de inferência/deriva), rastreio de versão de modelo/dados/config por decisão e trilha imutável de eventos de domínio.  
+   - **Impacto:** diagnóstico de incidentes e auditoria quantitativa mais custosos à medida que o sistema cresce.
+
+**Síntese:** a base atual é sólida para um bot enxuto (domínio claro, estado persistido, paridade crescente e testes). O principal limitante não é “falta de peças”, e sim o **estilo arquitetural** (loop síncrono + estado global + acoplamento de orquestração) que restringe escalabilidade, evolução e unificação definitiva pesquisa/produção.
+
+---
+
+## 2) O desenho da arquitetura mais eficiente possível (Target Architecture)
+
+### 2.1 Princípios de desenho (enxuto, para desenvolvedor solo)
+- **Core determinístico e puro(quanto possível):** decisão de trading como função de `(estado, evento, config)` sem IO direto.  
+- **Event-driven por dentro, simples por fora:** um barramento/event loop único (in-process) com contratos tipados; alimentadores e executores como adaptadores.  
+- **Uma fonte de verdade de eventos + projeções de estado:** estado materializado para consultas rápidas, mas decisões rastreáveis por eventos.  
+- **Paridade por construção:** produção, replay e backtest usam o mesmo pipeline de decisão; só muda a fonte de eventos e o adaptador de execução/tempo.  
+- **Evolução incremental:** interfaces estáveis, componentes substituíveis, complexidade distribuída adiada (sem microserviços/Kafka obrigatórios no início).
+
+### 2.2 Diagrama de fluxo de dados (alvo)
+
+```mermaid
+flowchart LR
+    subgraph FEEDS[Event Feeds / Alimentadores]
+      L[Live Feed<br/>Polling HTTP ou WebSocket]
+      R[Replay/Backtest Feed<br/>DB/CSV/Binance cache]
+      S[Sim Feed<br/>Sintético determinístico]
+    end
+
+    subgraph BUS[Event Bus + Clock]
+      Q[Fila ordenada por tempo/símbolo]
+      C[Clock unificado<br/>event-time / sim-time]
+    end
+
+    subgraph CORE[Trading Core - determinístico]
+      N[Normalização &amp; Validação]
+      FE[Feature/Regime Pipeline<br/>janelas incrementais]
+      SG[Signal Generation<br/>Strategy Orchestrator + Engines]
+      FL[Filter Chain<br/>Trend Confirm, Exhaustion, ML, Policy]
+      RM[Risk &amp; Portfolio<br/>limits, sizing, kill-switch]
+      EXD[Execution Decision<br/>intent: open/close/hold]
+    end
+
+    subgraph ADAPT[Adapters de Execução]
+      PX[Paper Executor]
+      BX[Broker/Exchange Executor<br/>ccxt / testnet / live]
+      BX2[Noop/Recorder para backtest]
+    end
+
+    subgraph STATE[State &amp; Persistence]
+      ES[Event Store / Journal append-only]
+      PS[Projection Store<br/>positions, equity, risk, KPIs]
+      AR[Artifact Store<br/>modelos, relatórios, configs]
+    end
+
+    subgraph OBS[Observabilidade &amp; Controle]
+      API[API/Dashboard read-only + comandos]
+      MT[Métricas/Logs/Tracing]
+    end
+
+    FEEDS --> Q --> N --> FE --> SG --> FL --> RM --> EXD
+    EXD --> ADAPT
+    ADAPT -->|fills/acks/rejects| Q
+    CORE -->|domain events| ES
+    ES --> PS
+    CORE --> MT
+    PS --> API
+    AR --> FE
+    AR --> FL
+```
+
+### 2.3 Papel de cada componente
+
+| Componente | Responsabilidade | Notas de eficiência/resiliência |
+|---|---|---|
+| **Event Feeds** | Converter fontes heterogêneas em eventos canônicos (`MarketTick`, `Candle`, `GapDetected`, `TimerTick`, `Fill`, `ControlCommand`). | Isolam latência/IO; permitem WebSocket sem tocar no core. |
+| **Event Bus + Clock** | Ordenação, dispatch e controle de tempo (real vs. simulado). | Garante determinismo no backtest e ordenação causal na produção. |
+| **Normalização/Validação** | Schema, saneamento, detecção de gaps/duplicatas/outliers. | Evita contaminação do estado e simplifica filtros. |
+| **Feature/Regime Pipeline** | Cálculo incremental de janelas, indicadores e regime (sem recomputar histórico inteiro a cada tick quando possível). | Principal ganho de CPU/memória em séries longas. |
+| **Signal Generation** | `StrategyOrchestrator` + engines produzindo intenções candidatas com metadados. | Mantém modularidade atual; facilita A/B de estratégias. |
+| **Filter Chain** | Confirmação de tendência, exaustão, ML, políticas de qualidade (pipeline declarativo e ordenado). | Paridade total e auditoria por estágio/motivo. |
+| **Risk & Portfolio** | Sizing, limites, cooldowns, drawdown, kill-switch, exposição por símbolo/global. | Único ponto de autoridade de risco (invariantes explícitas). |
+| **Execution Decision** | Traduz sinal aprovado em intenção de execução (ordem/fechamento) com contexto completo. | Separação entre “decidir” e “executar”. |
+| **Adapters de Execução** | Paper (simula fills), Broker/ccxt (real/testnet), Recorder (backtest puro). | Troca de venue sem reescrever decisão. |
+| **Event Store (append-only)** | Journal de eventos de domínio/mercado/execução. | Reprodutibilidade, auditoria, replay e depuração forense. |
+| **Projection Store** | Estado materializado para leitura rápida (posições, equity, risco, KPIs). | Consultas eficientes para API/dashboard. |
+| **Artifact Store** | Modelos versionados, configs efetivas, relatórios. | Rastreabilidade de “qual modelo/config decidiu o quê”. |
+| **API/Dashboard & Observabilidade** | Leitura de projeções, comandos controlados, métricas e tracing. | Operação segura e diagnósticos objetivos. |
+
+**Nota prática:** para um desenvolvedor solo, isso pode ser implementado in-process (ex.: loop `asyncio` ou dispatcher síncrono determinístico) com SQLite em modo WAL para projeções/journal, sem infraestrutura distribuída.
+
+---
+
+## 3) Pipeline de Dados e Execução (Tempo Real vs. Backtest)
+
+### 3.1 Problema atual
+- `monitor.py` e `simular.py` compartilham componentes, mas cada um ainda possui **orquestração própria** do fluxo tick-a-tick (ingestão, atualização de estado de confirmação, aplicação de filtros, avaliação de posição, contabilização/telemetria), o que historicamente gerou desvios de paridade e exige manutenção duplicada.
+
+### 3.2 Padrão recomendado: núcleo único orientado a eventos
+**Ideia central:** `monitor.py` e `simular.py` deixam de ser “dois motores” e passam a ser **dois adaptadores de entrada/saída** sobre o mesmo `DecisionEngine`.
+
+- **Contrato canônico de evento (exemplos):**
+  - `MarketDataEvent(timestamp, symbol, price|ohlcv, source, seq)`
+  - `ClockEvent(timestamp, tick_id)` (para sim/replay determinístico)
+  - `ExecutionReportEvent(order_id, status, filled_qty, avg_price, fees)`
+  - `ControlEvent(pause, resume, flatten, mode_change)`
+- **Contrato canônico de saída:**
+  - `Decision(intent=HOLD|OPEN|CLOSE, side, size, reason, context_snapshot)`
+  - `DomainEvent` imutável para journal (sinal gerado, filtro aplicado, risco bloqueou, ordem emitida, posição fechada, etc.)
+
+### 3.3 Fluxo unificado
+
+```mermaid
+sequenceDiagram
+    participant Feed as Feed (Live ou Backtest)
+    participant Bus as Event Bus/Clock
+    participant Core as DecisionEngine (único)
+    participant Exec as Executor (Paper/Broker/Recorder)
+    participant Store as Journal + Projeções
+
+    Feed->>Bus: MarketDataEvent(t)
+    Bus->>Core: dispatch(event, state_t)
+    Core->>Core: features/regime -> sinais -> filtros -> risco
+    Core->>Store: DomainEvents (auditoria)
+    Core->>Exec: Intent/Order (se houver)
+    Exec-->>Bus: ExecutionReportEvent (live/paper realista)
+    Bus->>Core: dispatch(report)
+    Core->>Store: atualização de estado/projeções
+```
+
+### 3.4 Como isso unifica na prática
+- **Produção (`monitor`/live):** `LiveFeed` (HTTP polling inicialmente, WebSocket depois) + `Clock` real + `PaperExecutor` ou `BrokerExecutor`.  
+- **Backtest (`simular`/replay):** `HistoricalFeed` (DB/CSV/API cache) + `SimClock` determinístico + `RecorderExecutor` (ou `PaperExecutor` com modelo de fills).  
+- **Pesquisa (sintético):** `SyntheticFeed` determinístico injeta os mesmos eventos.  
+- **Garantia de paridade:** mesmas funções de regime/features/filtros/risco/posição e mesma ordem de pipeline; diferenças restritas a (a) fonte/tempo, (b) modelo de execução/fills, (c) latência/slippage/fees configuráveis.
+
+### 3.5 Benefícios diretos
+- Elimina duplicação de lógica de decisão; reduz bugs de atribuição/paridade.  
+- Permite replay forense exato (reprocessar journal de mercado).  
+- Facilita testes de propriedade/determinismo e comparação apples-to-apples entre estratégias.
+
+---
+
+## 4) Evolução do Machine Learning e Estratégias
+
+### 4.1 Estado atual (síntese)
+- Pontos positivos: contrato de features centralizado (`features.py`), treino temporal com persistência atômica, inferência com hot-reload e fallback, integração como filtro no fluxo.  
+- Limitações: features fortemente acopladas ao momento de decisão síncrono, sem feature store/versionamento formal de datasets/modelos, sem avaliação contínua de deriva/calibração em produção, e evolução de indicadores exigindo tocar múltiplos pontos do pipeline.
+
+### 4.2 Arquitetura alvo para ML/estratégias (enxuta e extensível)
+
+1. **Feature Pipeline declarativo e incremental**  
+   - Definir features como transformações registradas (`FeatureSpec`: nome, dependências, janela, função, dtype) executadas sobre buffers/janelas incrementais por símbolo/timeframe.  
+   - Separar `online features` (baixa latência, usadas na decisão) de `offline features` (pesquisa/treino), com **paridade garantida** por implementação compartilhada.  
+   - Cachear janelas/indicadores para evitar reprocessamento completo a cada tick.
+
+2. **Registro e versionamento de artefatos**  
+   - `ModelRegistry` simples (em disco/DB): `model_id`, versão, hash, schema de features, janela de treino, métricas, config, data.  
+   - `Config/Strategy version` embutida em cada `DomainEvent` de decisão para rastreabilidade total.
+
+3. **Treino desacoplado e reprodutível**  
+   - Job de treino consome eventos/journal ou dataset materializado (mesmo contrato de features), gera relatório de validação (incl. walk-forward/temporal) e publica artefato atômico.  
+   - Inferência carrega por referência versionada; hot-reload seguro (já parcialmente atendido com lock/escrita atômica).
+
+4. **Estratégias como plugins sobre interfaces estáveis**  
+   - Contrato `Strategy.generate(context) -> Signal[]` e `Filter.apply(signal, context) -> Signal|Block`.  
+   - Composição declarativa por regime/perfil de risco (configurável), facilitando adicionar indicadores/engines sem alterar o core de orquestração.
+
+5. **Preparação para execução real (`ccxt` / Testnet) sem reescrever o core**  
+   - Introduzir **camada de abstração de execução**: `OrderIntent`, `Order`, `ExecutionReport`, `PositionReconciliation`.  
+   - `PaperExecutor` e `CcxtExecutor` implementam a mesma interface; core emite intenções, não chamadas de API.  
+   - Incluir no modelo: fees, slippage, latência, ordens parciais/rejeitadas, relógio de exchange e reconciliação periódica com estado da corretora.  
+   - Feature flags/modos (`research`, `paper`, `testnet`, `live`) selecionam adaptadores, não lógica de decisão.
+
+### 4.3 Ganhos esperados
+- Adição de indicadores/estratégias com menor risco de regressão.  
+- Treinos mais rápidos e comparáveis; decisões auditáveis por versão.  
+- Caminho incremental para testnet/live preservando o núcleo e a telemetria.
+
+---
+
+## 5) Roadmap de migração em fases (sem quebrar o sistema)
+
+### Fase 1 — Consolidação de contratos e paridade (baixo risco, alto retorno)
+**Objetivo:** eliminar deriva estrutural sem mudar o comportamento externo.  
+- Extrair interfaces/contratos internos: `MarketEvent`, `DecisionContext`, `OrderIntent`, `ExecutionResult`, `DomainEvent`.  
+- Criar um `DecisionPipeline` único (chamável) que encapsule: regime/features → orquestrador → confirmação → exaustão → ML → risco/posição.  
+- Fazer `monitor.py` e `simular.py` atuarem como **drivers finos** (feed + clock + persistência/telemetria) chamando o mesmo pipeline.  
+- Introduzir testes de paridade (golden traces / snapshots de decisões) entre replay e produção simulada.  
+- **Ganhos:** paridade garantida, menor duplicação, base para evolução.  
+- **Riscos:** refatoração ampla de orquestração; mitigação com testes existentes (68) + novos testes de regressão/paridade e migração incremental por flag.
+
+### Fase 2 — Event loop, clock unificado e IO desacoplado (risco médio)
+**Objetivo:** reduzir acoplamento temporal e preparar streaming.  
+- Introduzir fila/barramento in-process e `Clock` abstraído (real vs sim).  
+- Separar ingestão (feed adapter) e persistência/relatórios do caminho crítico de decisão (buffering/flush assíncrono controlado).  
+- Migrar SQLite para modo **WAL** + `busy_timeout`, separar conexões de leitura (dashboard) e escrita (core), mantendo compatibilidade de schema.  
+- Substituir polling rígido por abstração de feed que suporte, no futuro, WebSocket com fallback HTTP.  
+- **Ganhos:** menor latência/contensão, melhor responsividade do dashboard, base para dados em tempo quase real.  
+- **Riscos:** condições de corrida e ordering; mitigação com contratos de evento idempotentes, testes de concorrência e rollout gradual.
+
+### Fase 3 — Estado orientado a eventos, observabilidade e ML operacional (risco médio)
+**Objetivo:** auditabilidade forte e evolução segura de modelos/estratégias.  
+- Implementar journal append-only de eventos de domínio (mínimo viável) e projeções derivadas para estado/KPIs.  
+- Versionar modelos/configs/estratégias e registrar metadados em cada decisão/trade.  
+- Formalizar feature pipeline incremental e registro de indicadores/estratégias plugáveis.  
+- Adicionar métricas estruturadas (por estágio do funil, latência, erros de inferência, fallback).  
+- **Ganhos:** replay forense, depuração rápida, evolução controlada de ML/estratégias, menor reprocessamento.  
+- **Riscos:** crescimento de armazenamento e complexidade operacional; mitigação com retenção/compactação, escopo mínimo e documentação do fluxo.
+
+### Fase 4 — Abstração de execução e integração com corretora/testnet (risco médio/alto controlado)
+**Objetivo:** habilitar execução real sem reescrever o core.  
+- Implementar `ExecutionAdapter` com `PaperExecutor`, `RecorderExecutor` e `CcxtExecutor` (iniciando em **testnet/sandbox**).  
+- Modelar fees/slippage/latência, ordens e reconciliação de posições/saldos; separar estritamente modos `paper/testnet/live` por configuração e chaves.  
+- Executar shadow trading/paridade (decisão vs. execução simulada/real) antes de qualquer ativação live.  
+- **Ganhos:** caminho seguro para mercado real, reutilização total do núcleo e da telemetria.  
+- **Riscos:** risco financeiro/operacional e falhas de exchange; mitigação com kill-switch global, limites conservadores, testnet obrigatório, reconciliação contínua e alertas.
+
+### Visão de priorização recomendada
+1. **Fase 1** (maior alavancagem, menor risco) — fazer primeiro.  
+2. **Fase 2** — quando houver necessidade de menor latência/maior frequência ou múltiplos feeds.  
+3. **Fase 3** — para escalar pesquisa/ML com governança.  
+4. **Fase 4** — apenas após estabilidade operacional e validação em testnet.
+
+---
+
+## Conclusão
+O `Sistema_trading` atual possui uma base de domínio e de engenharia **acima da média para um projeto solo**: componentes bem separados, estado persistido e restaurável, contrato de features disciplinado, simulação com componentes reais e telemetria em evolução. A evolução para “máxima eficiência e escalabilidade enxuta” não depende de reescrita total, mas de **convergir para um núcleo único orientado a eventos** (com clock/feeds/adapters) e de fortalecer contratos, observabilidade e execução desacoplada. O roadmap acima preserva a estabilidade atual, reduz risco de regressão e cria um caminho claro e incremental até pesquisa avançada e integração com corretora.
