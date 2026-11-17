@@ -303,37 +303,82 @@ class DecisionPipeline:
                     "reason": ex_reason,
                 }
 
-        # 9) Classificador ML (quando treinado)
+        # 9) Classificador ML (somente quando validado out-of-sample)
+        #
+        # O filtro nunca deve ser a diferença entre operar e não operar por
+        # causa de um artefato degenerado. Quando o modelo não passa nos
+        # guardrails, o classificador roda em shadow mode: o score é
+        # telemetrado, mas a ação segue intacta.
         ml_score = result_signal.get("ml_score")
-        if (
-            self.apply_ml
-            and self.classifier is not None
-            and self.classifier.is_trained()
-        ):
-            action_before_ml = result_signal.get("action")
-            result_signal = dict(
-                self.classifier.filter_signal(result_signal, regime_metrics)
+        if self.apply_ml and self.classifier is not None:
+            classifier_ready = bool(self.classifier.is_trained())
+            usable_check = getattr(self.classifier, "is_usable", None)
+            ml_usable = (
+                bool(usable_check())
+                if usable_check is not None
+                else classifier_ready
             )
-            ml_score = result_signal.get("ml_score")
-            if (
-                action_before_ml in DIRECTIONAL_ACTIONS
-                and result_signal.get("action") == "NEUTRO"
-            ):
-                blocked_by = "ml"
-                block_reason = result_signal.get("reason") or "Filtrado por ML"
+            disabled_reason = getattr(
+                self.classifier, "disabled_reason", None
+            )
+
+            if classifier_ready:
+                action_before_ml = result_signal.get("action")
+                result_signal = dict(
+                    self.classifier.filter_signal(result_signal, regime_metrics)
+                )
+                ml_score = result_signal.get("ml_score")
+                if (
+                    ml_usable
+                    and action_before_ml in DIRECTIONAL_ACTIONS
+                    and result_signal.get("action") == "NEUTRO"
+                ):
+                    blocked_by = "ml"
+                    block_reason = (
+                        result_signal.get("reason") or "Filtrado por ML"
+                    )
+                    filter_details["ml"] = {
+                        "applied": True,
+                        "blocked": True,
+                        "score": result_signal.get("ml_score", 0.0),
+                        "threshold": getattr(
+                            self.classifier,
+                            "threshold",
+                            config.ML_APPROVAL_THRESHOLD,
+                        ),
+                    }
+                else:
+                    filter_details["ml"] = {
+                        "applied": ml_usable,
+                        "blocked": False,
+                        "shadow": bool(
+                            getattr(self.classifier, "shadow_mode", False)
+                        ),
+                        "reason": disabled_reason,
+                        "score": ml_score,
+                    }
+            else:
                 filter_details["ml"] = {
-                    "blocked": True,
-                    "score": result_signal.get("ml_score", 0.0),
-                    "threshold": config.ML_APPROVAL_THRESHOLD,
+                    "applied": False,
+                    "blocked": False,
+                    "reason": "model_not_trained",
                 }
 
         # 10) Risco e posição (autoridade única de entrada/saída)
+        #
+        # O snapshot de regime é anexado à sugestão para que o
+        # PositionManager persista as features pré-trade no fechamento.
+        position_suggestion = dict(result_signal)
+        position_suggestion.setdefault("regime_metrics", regime_metrics)
+        if ml_score is not None:
+            position_suggestion.setdefault("ml_score", ml_score)
+
         position_decision = self.position_manager.evaluate(
             symbol=position_symbol,
             signal=result_signal.get("action", "NEUTRO"),
             price=event.price,
             regime=regime,
-            suggestion=result_signal,
+            suggestion=position_suggestion,
             current_tick=context.tick,
         )
         position_action = position_decision.get("action", "NEUTRO")

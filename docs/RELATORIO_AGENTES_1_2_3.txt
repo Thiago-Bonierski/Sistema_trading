@@ -1,0 +1,348 @@
+================================================================================
+RELATORIO CONSOLIDADO DOS 3 AGENTES DE PESQUISA
+Sistema de Trading - Nucleo Quantitativo, ML e Performance de Execucao
+Data: 2026-11-17
+Base do codigo: commit 8319a30
+Status: NENHUMA MUDANCA APLICADA NO REPOSITORIO
+================================================================================
+
+
+--------------------------------------------------------------------------------
+0. ESCOPO E METODO
+--------------------------------------------------------------------------------
+
+Objetivo: focar 100% no nucleo quantitativo, ML e performance de execucao,
+deixando o frontend de lado. Tres agentes especializados executaram
+experimentacao empirica, um por vez, para descobrir a calibragem ideal e
+propor mudancas ANTES de aplicar qualquer alteracao definitiva.
+
+Restricoes respeitadas:
+  - config.py e frontend/ nao foram alterados durante os experimentos.
+  - Testes reais sobre dados Binance (BTC, SOL, USD) e seeds 42, 100, 2026.
+  - Simulacoes silenciosas por padrao; resumo apenas em __main__/--verbose.
+  - Experimentos nao sujaram o disco/repo: DB somente leitura, treinos em
+    memoria, artefatos em /tmp.
+  - Nenhum script temporario foi removido sem autorizacao.
+
+Divisao dos agentes:
+  - Agente 1: forense do bloqueio total do MLClassifier.
+  - Agente 2: comparacao de 4 perfis de calibragem de estrategia.
+  - Agente 3: sintese, mudancas exatas e parada para aprovacao.
+
+
+--------------------------------------------------------------------------------
+1. AGENTE 1 - FORENSE DO BLOQUEIO TOTAL DO ML
+--------------------------------------------------------------------------------
+
+Pergunta: por que o filtro ML bloqueia todas as entradas?
+
+1.1 Base analisada
+  - 349 linhas em trade_history.
+  - 157 trades economicamente unicos apos deduplicacao.
+  - Win rate bruto: 38,97%.
+  - Win rate deduplicado: 31,85%.
+  - PnL acumulado: -687,27.
+
+1.2 Diagnostico principal
+  O modelo treinado produz apenas DOIS scores distintos:
+    - 0,46648 -> associado a TENDENCIA_ALTA / COMPRA
+    - 0,53418 -> associado a TENDENCIA_BAIXA / VENDA
+  O threshold de aprovacao e 0,58.
+  Como o maximo possivel e 0,53418 < 0,58, o filtro NUNCA aprova:
+    - 0/349 trades aprovados.
+    - 0/8.544 sinais aprovados.
+    - 0 trades executados com ML ligado.
+
+1.3 Causa raiz (train/serve skew)
+  Quatro features previstas no contrato nunca foram persistidas no
+  trade_history e, por isso, chegam zeradas no treino:
+    - slope
+    - momentum
+    - range_rel
+    - volatility_ratio
+  Alem disso:
+    - confidence e engine sao constantes no historico.
+    - regime e action sao 100% colineares (o modelo aprende a mesma coisa
+      duas vezes).
+  Resultado: o modelo degenera para uma funcao de regime, nao de resultado.
+
+1.4 Poder preditivo medido
+  - AUC no holdout: 0,4847 (pior que aleatorio).
+  - AUC no DB completo: 0,5276 (IC95%: 0,474 - 0,582).
+  - AUC nos trades casados: 0,5158.
+  - Correlacao entre score e PnL: -0,161.
+  Conclusao: nao ha edge estatistico. O filtro nao separa vencedores de
+  perdedores.
+
+1.5 Comportamento de interruptor tudo-ou-nada
+  - Cold start: a heuristica sigmoide dava 0,9837 e aprovava 100%.
+  - Depois do primeiro treino: aprovacao cai para 0%.
+  O sistema passa de "opera tudo" para "nao opera nada" sem estado
+  intermediario.
+
+1.6 Onde o dinheiro realmente se perde
+  - Saida por regime_risk: 216 trades, 26,4% WR, -3.659,15.
+  - Saida por take_profit: +4.285,56.
+  A maior sangria esta na SAIDA (regime_risk), nao na entrada.
+
+1.7 Recomendacao do Agente 1
+  - Desativar o filtro ML imediatamente.
+  - Nao remover a arquitetura, mas impedir que um modelo sem edge bloqueie.
+  - Persistir as 4 features antes de qualquer retreino.
+  - Tratar o modelo atual como degenerado, nao como "modelo em producao".
+
+
+--------------------------------------------------------------------------------
+2. AGENTE 2 - CALIBRAGEM DE ESTRATEGIA (4 PERFIS)
+--------------------------------------------------------------------------------
+
+Pergunta: existe alguma calibragem de estrategia com edge comprovado?
+
+2.1 Desenho do experimento
+  - ML desligado, para comparacao justa entre perfis.
+  - Carga: 174 celulas + 6 combinacoes com ML ligado.
+  - 24.000 ticks por perfil por passada.
+  - Perfis comparados:
+      P0  = Atual (baseline)
+      P1a = Mais fluido
+      P2  = Assimetrico anti-short
+      P3  = Alvos dinamicos por ATR
+
+2.2 Resultado central
+  NENHUM perfil apresentou edge estatisticamente significativo.
+  - 26 de 26 diferencas contra P0 tiveram IC95% incluindo zero.
+  - Menor p-valor encontrado: 0,093 (e ainda negativo).
+  Ou seja: nenhuma variacao pode ser distinguida do baseline com confianca.
+
+2.3 Numeros no cenario DEFAULT
+  - P0 (atual):       PnL -201,60 | Profit Factor 0,811 | N=32
+  - P1a (fluido):     PnL  +79,84 | Profit Factor 1,061 | N=52
+  - P2a (anti-short): PnL -218,10
+  - Melhor nominal P3_sl1.5_tp4: +446,62
+      porem API -44,31 e ex-best -65,07 -> fragil.
+
+2.4 Numeros no cenario RELAXADO
+  - P0: +585,42.
+  - P3_sl2_tp4: +1.374,59 (melhor nominal).
+      porem API -5,85, ex-best -465,12 e desvio entre seeds de 1.211.
+      Resultado dominado por uma seed/um trade -> nao replicavel.
+
+2.5 Mito do "short e o problema"
+  No P0[RELAXADO]:
+    - COMPRA: +490,05
+    - VENDA:  +95,37
+  Bloquear short nao resolve; apenas reduz o numero de operacoes.
+  P2 (anti-short) piorou o cenario default (-218,10).
+
+2.6 ATR mal escalado
+  O alvo por ATR exige multiplicadores inviaveis e inconsistentes por ativo:
+    - BTC: k ~ 36
+    - SOL: k ~ 32
+    - USD: k ~ 286
+    - sintetico: k ~ 2,6
+  A variante ATR x raiz(30) piorou o resultado (-2.007,59 no relaxado).
+  P3 rejeitado.
+
+2.7 Funil de bloqueios
+  - Somente TrendFollowing opera de fato.
+  - blocked_volatile_regime: 3.726 bloqueios.
+  - blocked_risk_controller: 3.084 bloqueios.
+  Juntos, ~80% de todos os bloqueios. Tres regimes terminam com zero trades.
+
+2.8 Saidas no P0 default
+  - stop_loss:    10 trades, 0% WR, -863,75
+  - regime_risk:  12 trades,         -184,91
+  - take_profit:   8 trades,         +836,62
+  A perda esta concentrada em stop_loss e regime_risk.
+
+2.9 Recomendacao do Agente 2
+  - Manter P0 (nao ha evidencia para trocar).
+  - Rejeitar P2 (anti-short) e P3 (ATR).
+  - Nao tratar P1a como edge: e apenas mais atividade sem piora mensuravel.
+  - Priorizar a revisao das saidas (regime_risk/stop_loss) e do gate de
+    volatilidade na proxima rodada.
+
+
+--------------------------------------------------------------------------------
+3. AGENTE 3 - SINTESE E PROPOSTA
+--------------------------------------------------------------------------------
+
+Pergunta: como reconciliar os dois diagnosticos e o que mudar, exatamente?
+
+3.1 Reconciliacao Agente 1 x Agente 2
+  Onde convergem:
+    - O ML nao tem edge (Agente 1 pela matematica do modelo; Agente 2 por
+      ML-ON = 0 trades em 6/6 datasets).
+    - O historico e fraco e redundante (349 linhas = 157 trades unicos).
+    - A maior sangria e a saida, nao a entrada.
+
+  Onde parecem divergir:
+    - "Desligar o ML" x "manter P0" NAO sao contraditorios.
+    - O Agente 1 pede para desligar O FILTRO (correcao de seguranca).
+    - O Agente 2 pede para manter OS PARAMETROS DE ESTRATEGIA (nao ha
+      evidencia para mexer).
+    - Desliga-se o filtro quebrado; nao se mexe na estrategia sem evidencia.
+
+  Evidencia que prevalece:
+    - Para o ML: impossibilidade aritmetica (max 0,534 < 0,58) + skew de
+      features ausentes.
+    - Para a estrategia: ausencia de significancia + fragilidade a seed unica.
+
+3.2 Fase 0 - Desbloqueio seguro do ML (P0)
+  Objetivo: nenhum modelo degenerado/legado/sem validacao pode bloquear
+  entradas. O filtro vira fail-open com observabilidade.
+
+  C01 config.py          Novas constantes de guardrail e versionamento.
+  C02 ml_classifier.py   Le payload {pipeline, metadata}, valida dimensao.
+  C03 ml_classifier.py   Separa is_trained() de is_usable(); ml_status().
+  C04 ml_classifier.py   Shadow mode nao neutraliza; devolve score/reason.
+  C05 core/pipeline.py   So aplica o filtro com is_usable(); telemetra.
+  C06 core/pipeline.py   Propaga regime_metrics e ml_score na sugestao.
+  C07 simular.py         use_ml=True e flag CLI --no-ml (ablacao).
+  C08 monitor.py         Treino rejeitado nao faz hot-reload.
+  C09 app.py             /api/ml/status expoe usable/shadow/disabled_reason.
+  C10 (manual, opcional) Arquivar o ml_model.joblib degenerado.
+
+3.3 Fase 1 - Observabilidade e dados
+  Objetivo: o proximo treino ter features reais, sem duplicatas, com schema
+  versionado.
+
+  C11 database.py        Colunas slope/momentum/range_rel/volatility_ratio/
+                         ml_score/feature_schema_version (migracao aditiva).
+  C12 database.py        salvar_trade grava features + fallback legado.
+  C13 position_manager   Position carrega regime_metrics e ml_score.
+  C14 position_manager   Snapshot na entrada, propagacao no fechamento.
+  C15 features.py        deduplicate_trades() com chave economica.
+  C16 features.py        require_complete_features=True (falha alto).
+  C17 ml_training.py     Dedup + schema completo obrigatorio.
+  C18 ml_training.py     Remove class_weight="balanced".
+  C19 ml_training.py     AUC OOS, IC bootstrap, Brier, log-loss, quarentena.
+  C20 ml_training.py     Threshold por valor esperado (registra, nao aplica).
+
+3.4 Fase 2 - Criterio de retreino (guardrails ja codificados)
+  Um artefato so e aplicavel quando TODAS as condicoes valem:
+    - auc_oos >= 0,55;
+    - auc_ci_low >= 0,50;
+    - brier_oos < base_rate * (1 - base_rate);
+    - unique_train_scores >= 3;
+    - approval_rate_at_threshold >= 1%;
+    - holdout com >= 30 amostras.
+  Caso contrario: status="rejected", arquivo ml_model.rejected.joblib,
+  nunca carregado pelo pipeline.
+
+3.5 Fase 3 - Edge da estrategia (NAO promovida nesta rodada)
+  Registrado para a proxima rodada, sem patch:
+    - P1a (fluido): decisao de produto, nao edge.
+    - P2 (anti-short): rejeitado.
+    - P3 (ATR): rejeitado na formulacao k x ATR.
+    - Prioridade real: revisar regime_risk/stop_loss, o gate de volatilidade
+      (3.726 bloqueios) e destravar engines nao-tendenciais (hoje so
+      TrendFollowing opera).
+
+3.6 Validacao executada (em copia limpa em /tmp)
+  - git apply --check no repo real: OK (somente checagem).
+  - Suite completa na copia: 140 passed (eram 132; +8 de guardrails).
+  - Smoke test com o ml_model.joblib real degenerado:
+      trained=True, usable=False, shadow=True,
+      reason=legacy_model_without_validation.
+  - Resultado operacional: 0 -> 6 trades em 1.200 ticks sinteticos,
+    identico a use_ml=False.
+
+3.7 Escopo do patch
+  - 12 arquivos alterados, +990 / -81 linhas.
+  - Nenhuma mudanca em frontend/.
+  - Nenhuma alteracao em historico.db (migracao aditiva no proximo boot).
+  - Nenhum treino automatico disparado.
+
+
+--------------------------------------------------------------------------------
+4. O QUE NAO SERA FEITO NESTA RODADA
+--------------------------------------------------------------------------------
+
+  - P1a nao sera aplicado (sem significancia; so como decisao de produto).
+  - P2 (anti-short) nao sera aplicado (rejeitado empiricamente).
+  - P3 (ATR dinamico) nao sera aplicado (escala inviavel por ativo).
+  - Nenhuma mudanca em frontend/.
+  - Nenhuma limpeza de artefatos em /tmp sem autorizacao.
+  - Nenhuma alteracao em historico.db.
+  - Nenhum treino automatico.
+
+
+--------------------------------------------------------------------------------
+5. O QUE ESPERAR E O QUE NAO ESPERAR
+--------------------------------------------------------------------------------
+
+Certeza (comprovada):
+  - Desbloqueio: com o artefato atual, o filtro deixa de zerar trades.
+  - Observabilidade: cada decisao registra ml.applied, ml.shadow, ml.reason
+    e ml.score.
+  - Fim dos modelos zumbis: treino com features ausentes falha alto; modelo
+    sem edge vai para quarentena.
+
+Hipotese (nao comprovada):
+  - Retreinar com as 4 features pode elevar o AUC (nunca foram persistidas).
+  - O threshold por valor esperado pode melhorar o PnL (breakeven atual de
+    win rate: 41,22%).
+  - P1a pode aumentar atividade sem piorar risco (decisao de produto).
+
+O que NAO esperar:
+  - Este patch NAO torna o sistema lucrativo.
+  - Ele remove um bloqueio artificial e impede que um modelo sem edge volte
+    a bloquear.
+  - A perda estrutural (regime_risk/stop_loss) continua e exige a Fase 3.
+
+
+--------------------------------------------------------------------------------
+6. ESTADO ATUAL E PROXIMOS PASSOS
+--------------------------------------------------------------------------------
+
+Estado do repositorio:
+  - Git em 8319a30, sem alteracao de codigo-fonte.
+  - Arquivos nao rastreados/alterados esperados:
+      M data_cache/BTCBRL_1m_5000.csv
+      ? data_cache/BTCBRL_1m_20000.csv
+      ? ml_model.joblib (artefato degenerado; desarmado pelos guardrails)
+  - Patch validado com git apply --check, ainda NAO aplicado.
+
+Sequencia proposta (aguardando aprovacao explicita):
+  1. Revisar a proposta e o CHANGES.csv.
+  2. git apply do all.patch.
+  3. Rodar a suite completa (esperado: 140 passed).
+  4. Smoke test ML-ON x ML-OFF em 1.200 ticks.
+  5. (Opcional) arquivar o ml_model.joblib degenerado.
+  6. Reiniciar backend e observar 24-48h (features preenchidas no DB).
+  7. Apos >= 30 trades unicos com schema v2, disparar treino.
+  8. So promover com status="accepted"; so entao considerar
+     ML_SHADOW_MODE=False.
+
+Rollback:
+  - Codigo: git apply -R do all.patch.
+  - Runtime imediato: ML_SHADOW_MODE=True (default) ou --no-ml.
+  - Dados: migracao aditiva; sem downgrade destrutivo.
+  - Modelo: rejeitados ficam em ml_model.rejected.joblib e nunca carregam.
+
+Artefatos:
+  - /tmp/opencode/agent3_synthesis/PROPOSAL.md
+  - /tmp/opencode/agent3_synthesis/CHANGES.csv
+  - /tmp/opencode/agent3_synthesis/patches/all.patch
+  - /tmp/opencode/agent3_synthesis/patches/*.patch (por arquivo)
+  - /tmp/opencode/agent3_synthesis/repo_copy/ (copia com patch, 140 passed)
+  - /tmp/opencode/agent3_synthesis/smoke.py
+
+Observacao: os relatorios brutos dos Agentes 1 e 2 nao estao mais presentes
+em /tmp/opencode (apenas agent3_synthesis permanece). Os achados acima sao o
+registro consolidado dos experimentos executados.
+
+
+--------------------------------------------------------------------------------
+7. PEDIDO DE APROVACAO
+--------------------------------------------------------------------------------
+
+Aprovar a aplicacao de patches/all.patch (12 arquivos, +990/-81) e,
+opcionalmente, o arquivamento do ml_model.joblib degenerado.
+
+Nada sera aplicado antes do "pode aplicar".
+
+================================================================================
+FIM DO RELATORIO
+================================================================================

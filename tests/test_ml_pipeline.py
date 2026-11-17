@@ -77,7 +77,9 @@ class TestMLPipelineFimAFim:
             exit_price REAL, entry_tick INTEGER, exit_tick INTEGER,
             entry_regime TEXT, exit_regime TEXT, engine TEXT, confidence REAL,
             pnl REAL, position_size REAL, duration_ticks INTEGER,
-            reason TEXT, aggressiveness TEXT)''')
+            reason TEXT, aggressiveness TEXT,
+            slope REAL, momentum REAL, range_rel REAL, volatility_ratio REAL,
+            ml_score REAL, feature_schema_version INTEGER)''')
         rng = random.Random(seed)
         regimes = ['TENDENCIA_ALTA', 'TENDENCIA_BAIXA', 'CONSOLIDACAO']
         engines = ['TrendFollowing', 'MeanReversion', 'BreakoutMomentum']
@@ -86,24 +88,41 @@ class TestMLPipelineFimAFim:
             side = rng.choice(sides)
             entry = rng.uniform(90, 110)
             pnl = rng.uniform(-500, 500)
+            # Sinal sintético: as features de mercado carregam informação
+            # sobre o resultado, como no schema v2 de produção.
+            slope = pnl / 10000.0 + rng.uniform(-0.02, 0.02)
+            momentum = pnl / 20000.0 + rng.uniform(-0.01, 0.01)
             conn.execute(
                 '''INSERT INTO trade_history
                    (symbol,side,entry_price,exit_price,entry_tick,exit_tick,
                     entry_regime,exit_regime,engine,confidence,pnl,
-                    position_size,duration_ticks,reason,aggressiveness)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    position_size,duration_ticks,reason,aggressiveness,
+                    slope,momentum,range_rel,volatility_ratio,ml_score,
+                    feature_schema_version)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 ('USD', side, entry, entry + pnl / 10000, i, i + 10,
                  rng.choice(regimes), 'TENDENCIA_ALTA', rng.choice(engines),
-                 rng.uniform(0.5, 0.95), pnl, 10000.0, 10, 'take_profit', 'NORMAL'))
+                 rng.uniform(0.5, 0.95), pnl, 10000.0, 10, 'take_profit',
+                 'NORMAL', slope, momentum, rng.uniform(0.001, 0.01),
+                 rng.uniform(0.8, 1.5), None, 2))
         conn.commit()
         conn.close()
         return tmp
 
-    def test_treino_e_inferencia_alinhados(self):
+    def test_treino_e_inferencia_alinhados(self, monkeypatch):
         """O modelo treinado deve inferir com as mesmas 8 features do contrato."""
         import importlib
         importlib.reload(ml_training)
         importlib.reload(ml_classifier)
+
+        # Este teste valida o alinhamento do contrato, não a promoção do
+        # modelo. Guardrails são relaxados para aceitar o artefato sintético.
+        monkeypatch.setattr(ml_training.config, "ML_MIN_AUC_OOS", 0.0)
+        monkeypatch.setattr(ml_training.config, "ML_MIN_AUC_CI_LOW", 0.0)
+        monkeypatch.setattr(ml_training.config, "ML_MIN_APPROVAL_RATE", 0.0)
+        monkeypatch.setattr(ml_training.config, "ML_MIN_UNIQUE_SCORES", 1)
+        monkeypatch.setattr(ml_training.config, "ML_MIN_VALIDATION_SAMPLES", 1)
+
         tmp = self._criar_banco_sintetico(n_trades=120, seed=11)
         modelo_path = Path('/tmp/opencode/test_pipeline_model_alinhado.joblib')
 

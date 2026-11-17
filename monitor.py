@@ -400,13 +400,22 @@ def training_loop(trainer, kpi_tracker_ref: KPITracker) -> None:
             # Treinar modelo
             logger.info("Iniciando treinamento periódico do ML...")
             resultado = trainer.train_model()
-            
-            # Recarregar o modelo no classificador em produção (hot-reload)
-            classifier.reload_model()
 
-            logger.info(
-                f"✅ Treino concluído: score={resultado.get('test_score', 0.0):.4f}"
-            )
+            if resultado.get("status") == "rejected":
+                metrics = resultado.get("metrics", {}) or {}
+                logger.warning(
+                    "⛔ Treino rejeitado pelos guardrails: %s "
+                    "(artefato em %s não será aplicado)",
+                    metrics.get("rejection_reasons"),
+                    resultado.get("model_path"),
+                )
+            else:
+                # Recarregar o modelo no classificador em produção (hot-reload)
+                classifier.reload_model()
+                logger.info(
+                    f"✅ Treino concluído: score={resultado.get('test_score', 0.0):.4f} "
+                    f"AUC={resultado.get('metrics', {}).get('auc_oos')}"
+                )
             
             # Salvar relatórios
             relatorio = {

@@ -1076,7 +1076,13 @@ def _read_json_file(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _ml_status_payload() -> Dict[str, Any]:
-    trained = classifier.is_trained()
+    status = (
+        classifier.ml_status()
+        if hasattr(classifier, "ml_status")
+        else {"trained": classifier.is_trained()}
+    )
+    trained = bool(status.get("trained"))
+    usable = bool(status.get("usable", trained))
     model_path = Path(config.ML_MODEL_PATH)
     model_stat = None
     if model_path.exists():
@@ -1095,8 +1101,17 @@ def _ml_status_payload() -> Dict[str, Any]:
 
     return {
         "trained": trained,
-        "mode": "model" if trained else "heuristic",
-        "label": "Modelo treinado" if trained else "Heurística",
+        "usable": usable,
+        "shadow_mode": bool(status.get("shadow_mode", False)),
+        "disabled_reason": status.get("disabled_reason"),
+        "mode": (
+            "model" if usable else ("shadow" if trained else "heuristic")
+        ),
+        "label": (
+            "Modelo validado"
+            if usable
+            else ("Modelo em observação" if trained else "Heurística")
+        ),
         "threshold": float(getattr(classifier, "threshold", 0.0)),
         "model_path": str(model_path),
         "model_exists": model_path.exists(),

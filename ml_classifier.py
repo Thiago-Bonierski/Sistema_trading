@@ -91,6 +91,7 @@ class MLClassifier:
         self,
         threshold: float = config.ML_APPROVAL_THRESHOLD,
         model_path: Path = config.ML_MODEL_PATH,
+        shadow_mode: Optional[bool] = None,
     ):
         """
         Inicializa classificador ML.
@@ -98,17 +99,26 @@ class MLClassifier:
         Args:
             threshold: Score mínimo para aprovar trade (0.0 a 1.0)
             model_path: Caminho do arquivo do modelo
+            shadow_mode: Se True, calcula o score mas nunca bloqueia a
+                entrada. None usa `config.ML_SHADOW_MODE`.
         """
         self.threshold = threshold
         self.model_path = model_path
         self.model = None
+        self.metadata: Dict[str, Any] = {}
+        self.disabled_reason: Optional[str] = None
+        self.shadow_mode = (
+            config.ML_SHADOW_MODE if shadow_mode is None else shadow_mode
+        )
         self._last_mtime: Optional[float] = None
         self._lock = threading.RLock()
         self._load_model()
 
         logger.info(
             f"MLClassifier inicializado: threshold={threshold:.2f}, "
-            f"model={'loaded' if self.model else 'not available'}"
+            f"model={'loaded' if self.model else 'not available'}, "
+            f"usable={self.is_usable()}, shadow={self.shadow_mode}, "
+            f"reason={self.disabled_reason or '-'}"
         )
 
     def _load_model(self) -> Optional[Any]:
@@ -126,6 +136,8 @@ class MLClassifier:
             if not self.model_path.exists():
                 logger.debug(f"Modelo não encontrado em {self.model_path}")
                 self.model = None
+                self.metadata = {}
+                self.disabled_reason = None
                 self._last_mtime = None
                 return None
 
@@ -135,17 +147,117 @@ class MLClassifier:
                     # Já carregado, nenhuma mudança
                     return self.model
 
-                model = joblib.load(str(self.model_path))
+                payload = joblib.load(str(self.model_path))
+
+                # Formato v2: {"pipeline": ..., "metadata": {...}}.
+                # Artefatos antigos (pipeline puro) são aceitos para
+                # inferência, mas ficam inelegíveis para aplicar o filtro.
+                if isinstance(payload, dict) and "pipeline" in payload:
+                    model = payload["pipeline"]
+                    metadata = dict(payload.get("metadata") or {})
+                else:
+                    model = payload
+                    metadata = {}
+
+                if not hasattr(model, "predict_proba"):
+                    logger.error(
+                        "Artefato ML inválido: pipeline sem predict_proba"
+                    )
+                    self.model = None
+                    self.metadata = metadata
+                    self.disabled_reason = "invalid_model_artifact"
+                    self._last_mtime = None
+                    return None
+
+                n_features = getattr(model, "n_features_in_", N_FEATURES)
+                if int(n_features) != N_FEATURES:
+                    logger.error(
+                        f"Modelo ML incompatível: {n_features} features "
+                        f"(contrato atual={N_FEATURES})"
+                    )
+                    self.model = None
+                    self.metadata = metadata
+                    self.disabled_reason = "feature_dimension_mismatch"
+                    self._last_mtime = None
+                    return None
+
                 self.model = model
+                self.metadata = metadata
                 self._last_mtime = current_mtime
+                self._evaluate_guardrails()
                 logger.info(f"Modelo ML carregado de {self.model_path}")
                 return model
 
             except Exception as e:
                 logger.error(f"Erro ao carregar modelo: {e}", exc_info=True)
                 self.model = None
+                self.metadata = {}
+                self.disabled_reason = None
                 self._last_mtime = None
                 return None
+
+    def _evaluate_guardrails(self) -> None:
+        """
+        Decide se o artefato carregado pode efetivamente filtrar entradas.
+
+        Um modelo só é aplicável quando o treino comprova edge temporal
+        out-of-sample. Modelos legados (sem metadados), degenerados (poucos
+        scores distintos) ou com threshold inatingível ficam em shadow mode.
+        """
+        reasons: List[str] = []
+        metadata = self.metadata or {}
+
+        if self.model is None:
+            self.disabled_reason = None
+            return
+
+        if not metadata:
+            reasons.append("legacy_model_without_validation")
+        else:
+            if metadata.get("status") not in (None, "accepted"):
+                reasons.append("model_rejected_by_training")
+
+            auc = metadata.get("auc_oos")
+            if auc is None:
+                reasons.append("missing_auc_oos")
+            elif float(auc) < config.ML_MIN_AUC_OOS:
+                reasons.append("auc_oos_below_min")
+
+            ci_low = metadata.get("auc_ci_low")
+            if ci_low is None:
+                reasons.append("missing_auc_ci_low")
+            elif float(ci_low) < config.ML_MIN_AUC_CI_LOW:
+                reasons.append("auc_ci_low_below_min")
+
+            unique_scores = metadata.get("unique_train_scores")
+            if (
+                unique_scores is not None
+                and int(unique_scores) < config.ML_MIN_UNIQUE_SCORES
+            ):
+                reasons.append("degenerate_scores")
+
+            approval_rate = metadata.get("approval_rate_at_threshold")
+            if (
+                approval_rate is not None
+                and float(approval_rate) < config.ML_MIN_APPROVAL_RATE
+            ):
+                reasons.append("threshold_unreachable")
+
+            schema = metadata.get("feature_schema_version")
+            if (
+                schema is not None
+                and int(schema) != config.ML_FEATURE_SCHEMA_VERSION
+            ):
+                reasons.append("feature_schema_mismatch")
+
+        self.disabled_reason = ",".join(reasons) or None
+        if self.disabled_reason:
+            logger.warning(
+                "ML_DISABLED_DEGENERATE model=%s reasons=%s shadow=%s",
+                self.model_path,
+                self.disabled_reason,
+                self.shadow_mode,
+            )
 
     def reload_model(self) -> bool:
         """
@@ -169,6 +281,8 @@ class MLClassifier:
                 with self._lock:
                     if self.model is not None:
                         self.model = None
+                        self.metadata = {}
+                        self.disabled_reason = None
                         self._last_mtime = None
                         logger.info("Modelo removido do disco, inferência via heurística")
                 return
@@ -182,7 +296,7 @@ class MLClassifier:
 
     def is_trained(self) -> bool:
         """
-        Verifica se modelo ML está disponível.
+        Verifica se modelo ML está disponível (validação estrutural).
 
         Returns:
             True se modelo carregado
@@ -190,6 +304,33 @@ class MLClassifier:
         self._maybe_reload()
         with self._lock:
             return self.model is not None
+
+    def is_usable(self) -> bool:
+        """
+        Verifica se o modelo pode efetivamente filtrar entradas.
+
+        Diferente de `is_trained()`, exige que o artefato tenha passado nos
+        guardrails de validação (AUC OOS, scores distintos, threshold
+        atingível). Um modelo treinado mas não validado é observado em
+        shadow mode, sem bloquear trades.
+        """
+        self._maybe_reload()
+        with self._lock:
+            return self.model is not None and self.disabled_reason is None
+
+    def ml_status(self) -> Dict[str, Any]:
+        """Retorna o estado do filtro ML para telemetria/API."""
+        self._maybe_reload()
+        with self._lock:
+            return {
+                "trained": self.model is not None,
+                "usable": self.model is not None and self.disabled_reason is None,
+                "shadow_mode": self.shadow_mode,
+                "disabled_reason": self.disabled_reason,
+                "threshold": self.threshold,
+                "model_path": str(self.model_path),
+                "metadata": dict(self.metadata),
+            }
 
     @staticmethod
     def _sigmoid(x: float) -> float:
@@ -356,6 +497,19 @@ class MLClassifier:
         # Modificar sugestão
         filtered = suggestion.copy()
         filtered["ml_score"] = score
+
+        # Shadow mode: observa o score, mas nunca neutraliza a entrada.
+        if self.shadow_mode or not self.is_usable():
+            filtered["ml_shadow"] = True
+            if self.disabled_reason:
+                filtered["ml_disabled_reason"] = self.disabled_reason
+            logger.debug(
+                "ML shadow: score=%.4f action=%s reason=%s",
+                score,
+                suggestion.get("action"),
+                self.disabled_reason or "shadow_mode",
+            )
+            return filtered
 
         # Se reprovado, converter para NEUTRO
         if not approved and suggestion.get("action") != "NEUTRO":

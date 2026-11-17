@@ -191,6 +191,12 @@ class DatabaseManager:
                     duration_ticks INTEGER NOT NULL,
                     reason TEXT,
                     aggressiveness TEXT,
+                    slope REAL,
+                    momentum REAL,
+                    range_rel REAL,
+                    volatility_ratio REAL,
+                    ml_score REAL,
+                    feature_schema_version INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -340,6 +346,14 @@ def init_database() -> None:
         ("cotacoes", "created_at", "TIMESTAMP"),
         ("trade_history", "position_size", "REAL"),
         ("trade_history", "aggressiveness", "TEXT"),
+        # Features pré-trade persistidas (schema v2). Sem elas o ML treina
+        # com colunas zeradas e produz um modelo degenerado.
+        ("trade_history", "slope", "REAL"),
+        ("trade_history", "momentum", "REAL"),
+        ("trade_history", "range_rel", "REAL"),
+        ("trade_history", "volatility_ratio", "REAL"),
+        ("trade_history", "ml_score", "REAL"),
+        ("trade_history", "feature_schema_version", "INTEGER"),
     ]
 
     for table, column, col_type in migrations:
@@ -392,14 +406,16 @@ def salvar_trade(trade_result: dict) -> None:
     Args:
         trade_result: Dicionário com dados do trade
     """
-    query = """
-        INSERT INTO trade_history (
-            symbol, side, entry_price, exit_price, entry_tick, exit_tick,
-            entry_regime, exit_regime, engine, confidence, pnl, position_size,
-            duration_ticks, reason, aggressiveness
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
-    db_manager.execute(query, (
+    feature_defaults = {
+        "slope": None,
+        "momentum": None,
+        "range_rel": None,
+        "volatility_ratio": None,
+        "ml_score": None,
+        "feature_schema_version": config.ML_FEATURE_SCHEMA_VERSION,
+    }
+
+    base_params = (
         trade_result["symbol"],
         trade_result["side"],
         trade_result["entry_price"],
@@ -415,7 +431,42 @@ def salvar_trade(trade_result: dict) -> None:
         trade_result["duration_ticks"],
         trade_result["reason"],
         trade_result.get("aggressiveness"),
-    ))
+    )
+
+    query = """
+        INSERT INTO trade_history (
+            symbol, side, entry_price, exit_price, entry_tick, exit_tick,
+            entry_regime, exit_regime, engine, confidence, pnl, position_size,
+            duration_ticks, reason, aggressiveness,
+            slope, momentum, range_rel, volatility_ratio, ml_score,
+            feature_schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    params = base_params + tuple(
+        trade_result.get(key, default)
+        for key, default in feature_defaults.items()
+    )
+
+    try:
+        db_manager.execute(query, params)
+        return
+    except sqlite3.OperationalError as exc:
+        # Bancos antigos (sem a migração de features) continuam funcionando.
+        if "no column named" not in str(exc):
+            raise
+        logger.warning(
+            "trade_history sem colunas de features; gravando no schema legado"
+        )
+
+    legacy_query = """
+        INSERT INTO trade_history (
+            symbol, side, entry_price, exit_price, entry_tick, exit_tick,
+            entry_regime, exit_regime, engine, confidence, pnl, position_size,
+            duration_ticks, reason, aggressiveness
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    db_manager.execute(legacy_query, base_params)
 
 
 # ============================================================================

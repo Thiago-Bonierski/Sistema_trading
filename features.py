@@ -28,6 +28,7 @@ import logging
 import pandas as pd
 import numpy as np
 
+import config
 from logging_config import setup_logging
 
 logger = setup_logging("features", "INFO")
@@ -52,6 +53,15 @@ CATEGORICAL_FEATURES: List[str] = [
 
 FEATURE_COLUMNS: List[str] = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 N_FEATURES: int = len(FEATURE_COLUMNS)
+
+# Features de mercado que precisam ser persistidas no trade_history a partir
+# da versão 2 do schema. Sem elas, o treino opera às cegas (todas viram 0.0).
+TRADE_FEATURE_COLUMNS: List[str] = [
+    "slope",
+    "momentum",
+    "range_rel",
+    "volatility_ratio",
+]
 
 # Mapeamentos de ação para normalizar strings em código numérico (fallback)
 ACTION_MAP: Dict[str, int] = {
@@ -130,8 +140,50 @@ def build_feature_row(
     }
 
 
+def deduplicate_trades(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove trades economicamente duplicados do histórico.
+
+    O banco pode conter a mesma execução gravada várias vezes (o forense do
+    Agente 1 encontrou 349 linhas para 157 trades únicos). A chave usa apenas
+    campos observáveis da execução e ignora `id`/`created_at`.
+
+    Returns:
+        DataFrame deduplicado (mantém a primeira ocorrência).
+    """
+    if df is None or df.empty:
+        return df
+
+    key_candidates = [
+        "symbol",
+        "side",
+        "entry_tick",
+        "exit_tick",
+        "entry_price",
+        "exit_price",
+        "pnl",
+    ]
+    key = [c for c in key_candidates if c in df.columns]
+    if not key:
+        return df
+
+    before = len(df)
+    deduped = df.drop_duplicates(subset=key, keep="first").reset_index(drop=True)
+    removed = before - len(deduped)
+    if removed:
+        logger.warning(
+            f"Deduplicação removeu {removed} linhas "
+            f"({before} -> {len(deduped)}) pela chave {key}"
+        )
+    return deduped
+
+
 def build_training_frame(
     df: pd.DataFrame,
+    *,
+    require_complete_features: bool = False,
+    deduplicate: bool = False,
+    min_samples: int = 0,
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.Series]]:
     """
     Constrói X (features) e y (target) a partir do histórico de trades.
@@ -141,17 +193,31 @@ def build_training_frame(
 
     Colunas esperadas em df:
         confidence, entry_regime, engine, pnl, regime, action (ou side),
-        slope, momentum, range_rel, volatility_ratio (opcionais, preenchidos
-        com 0.0 se ausentes).
+        slope, momentum, range_rel, volatility_ratio.
+
+    Args:
+        require_complete_features: Se True, exige que as features de mercado
+            estejam persistidas e descarta linhas incompletas. Use sempre no
+            treino de produção; o modo legado (False) preenche com 0.0 e serve
+            apenas para compatibilidade de testes/chamadas antigas.
+        deduplicate: Remove trades economicamente duplicados antes de montar X.
+        min_samples: Mínimo de linhas restantes após os filtros.
 
     Returns:
         (X, y) ou (None, None) se dados insuficientes.
+
+    Raises:
+        ValueError: Quando require_complete_features=True e não há amostras
+            suficientes com o schema completo.
     """
     if df is None or df.empty:
         logger.warning("DataFrame vazio, não há dados para features")
         return None, None
 
     df = df.copy()
+
+    if deduplicate:
+        df = deduplicate_trades(df)
 
     # Normalizar 'side' para 'action' se necessário
     if "action" not in df.columns and "side" in df.columns:
@@ -164,22 +230,47 @@ def build_training_frame(
         logger.error(f"Colunas faltando no DataFrame: {missing}")
         return None, None
 
-    # Preencher features numéricas opcionais
-    for col, default in (
-        ("slope", 0.0),
-        ("momentum", 0.0),
-        ("range_rel", 0.0),
-        ("volatility_ratio", 0.0),
-    ):
-        if col not in df.columns:
-            df[col] = default
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+    if require_complete_features:
+        missing_features = [c for c in TRADE_FEATURE_COLUMNS if c not in df.columns]
+        if missing_features:
+            raise ValueError(
+                "Schema de features incompleto para treino: "
+                f"{missing_features}. Persista as features na entrada "
+                "(features_version >= "
+                f"{config.ML_FEATURE_SCHEMA_VERSION}) ou use o modo legado "
+                "explicitamente."
+            )
+        for col in TRADE_FEATURE_COLUMNS:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce")
+        df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce")
+
+        before = len(df)
+        df = df.dropna(
+            subset=TRADE_FEATURE_COLUMNS + ["confidence", "pnl"]
+        ).reset_index(drop=True)
+        if len(df) < max(1, min_samples):
+            raise ValueError(
+                f"Amostras completas insuficientes para treino: "
+                f"{len(df)} de {before} linhas "
+                f"(mínimo {max(1, min_samples)})."
+            )
+        logger.info(
+            f"Treino com schema completo: {len(df)}/{before} linhas "
+            "com features de mercado persistidas"
+        )
+    else:
+        # Modo legado: preenche features ausentes com 0.0.
+        for col in TRADE_FEATURE_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0.0
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce").fillna(0.5)
 
     # Preencher categóricas
     df["entry_regime"] = df["entry_regime"].fillna("DESCONHECIDO").astype(str)
     df["engine"] = df["engine"].fillna("UNKNOWN").astype(str)
     df["action"] = df["action"].fillna("NEUTRO").astype(str)
-    df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce").fillna(0.5)
 
     # Renomear entry_regime -> regime para alinhar com o contrato de inferência
     df = df.rename(columns={"entry_regime": "regime"})

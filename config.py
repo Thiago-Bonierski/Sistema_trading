@@ -171,6 +171,21 @@ BREAKOUT_CONFIDENCE = 0.68
 # ML Classifier
 ML_APPROVAL_THRESHOLD = 0.58       # Threshold para aprovar trades
 
+# Guardrails do filtro ML. O filtro só é aplicado quando o artefato em disco
+# comprova edge out-of-sample. Caso contrário o classificador opera em modo
+# observador (shadow) e NÃO bloqueia entradas.
+ML_SHADOW_MODE = True              # Calcula score e telemetra, mas não bloqueia
+ML_FEATURE_SCHEMA_VERSION = 2      # v2 = slope/momentum/range_rel/volatility_ratio persistidos
+ML_MODEL_SCHEMA_VERSION = 2        # Formato do artefato: {"pipeline", "metadata"}
+ML_MIN_UNIQUE_SCORES = 3           # Menos scores distintos que isso = modelo degenerado
+ML_MIN_AUC_OOS = 0.55              # AUC temporal mínima para aplicar o filtro
+ML_MIN_AUC_CI_LOW = 0.50           # Limite inferior do IC95% do AUC
+ML_MAX_BRIER_RATIO = 1.0           # Brier deve ser melhor que a taxa-base
+ML_MIN_APPROVAL_RATE = 0.01        # Aprovação mínima no holdout no threshold atual
+ML_MIN_VALIDATION_SAMPLES = 30     # Mínimo de amostras no holdout para validar
+ML_VALIDATION_BOOTSTRAP = 1000     # Reamostragens para o IC do AUC
+ML_REJECTED_MODEL_SUFFIX = ".rejected.joblib"
+
 # ============================================================================
 # MONITORING
 # ============================================================================

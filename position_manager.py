@@ -3,7 +3,7 @@ Gerenciamento de posições abertas no sistema de trading.
 
 Controla entradas, saídas, stop-loss, take-profit e idade das posições.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 import logging
 import threading
@@ -47,6 +47,10 @@ class Position:
     engine: str = ""
     confidence: float = 0.0
     details: str = ""
+    # Snapshot pré-trade persistido junto ao fechamento. Permite treinar ML
+    # com as métricas de mercado realmente observadas na entrada.
+    regime_metrics: Dict[str, Any] = field(default_factory=dict)
+    ml_score: Optional[float] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -67,6 +71,8 @@ class Position:
             "engine": self.engine,
             "confidence": self.confidence,
             "details": self.details,
+            "regime_metrics": dict(self.regime_metrics),
+            "ml_score": self.ml_score,
         }
     
     @classmethod
@@ -92,6 +98,12 @@ class Position:
             engine=data.get("engine", ""),
             confidence=float(data.get("confidence", 0.0)),
             details=data.get("details", ""),
+            regime_metrics=dict(data.get("regime_metrics") or {}),
+            ml_score=(
+                float(data["ml_score"])
+                if data.get("ml_score") is not None
+                else None
+            ),
         )
 
 
@@ -212,7 +224,9 @@ class PositionManager:
         engine: str,
         confidence: float,
         details: str,
-        entry_tick: int
+        entry_tick: int,
+        regime_metrics: Optional[Dict[str, Any]] = None,
+        ml_score: Optional[float] = None,
     ) -> Optional[Position]:
         """
         Constrói nova posição com stops e targets.
@@ -255,6 +269,8 @@ class PositionManager:
             engine=engine,
             confidence=confidence,
             details=details,
+            regime_metrics=dict(regime_metrics or {}),
+            ml_score=ml_score,
         )
         
         logger.info(
@@ -274,7 +290,9 @@ class PositionManager:
         engine: str,
         confidence: float,
         details: str,
-        entry_tick: int
+        entry_tick: int,
+        regime_metrics: Optional[Dict[str, Any]] = None,
+        ml_score: Optional[float] = None,
     ) -> Optional[Position]:
         """
         Abre nova posição se já não houver uma aberta.
@@ -298,7 +316,9 @@ class PositionManager:
         
         position = self._build_position(
             symbol, side, price, regime, engine,
-            confidence, details, entry_tick
+            confidence, details, entry_tick,
+            regime_metrics=regime_metrics,
+            ml_score=ml_score,
         )
         
         if position is not None:
@@ -379,6 +399,11 @@ class PositionManager:
                 self.risk_controller.aggressiveness_level 
                 if self.risk_controller else "UNKNOWN"
             ),
+            "slope": position.regime_metrics.get("slope"),
+            "momentum": position.regime_metrics.get("momentum"),
+            "range_rel": position.regime_metrics.get("range_rel"),
+            "volatility_ratio": position.regime_metrics.get("volatility_ratio"),
+            "ml_score": position.ml_score,
         }
         
         logger.info(
@@ -445,6 +470,8 @@ class PositionManager:
                     confidence=suggestion.get("confidence", 0.0),
                     details=suggestion.get("details", ""),
                     entry_tick=current_tick,
+                    regime_metrics=suggestion.get("regime_metrics"),
+                    ml_score=suggestion.get("ml_score"),
                 )
                 return {"action": signal, "event": "ENTRY", "position": opened}
             

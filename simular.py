@@ -489,6 +489,7 @@ def run_simulation(
     symbol: str = "USD",
     force_download: bool = False,
     interval: str = "1m",
+    use_ml: bool = True,
 ) -> Dict[str, Any]:
     """
     Executa simulação completa usando os componentes reais de produção.
@@ -502,6 +503,7 @@ def run_simulation(
         symbol: Símbolo da moeda (usado para fontes db e api)
         force_download: Se True, ignora cache e baixa novamente da API
         interval: Intervalo do candle para fonte API (default: "1m")
+        use_ml: Se False, desliga o filtro ML no pipeline (ablação)
 
     Returns:
         Dicionário com resultados da simulação
@@ -566,6 +568,7 @@ def run_simulation(
         trend_tracker=trend_tracker,
         update_drawdown=False,
         reset_regime_counts=False,
+        apply_ml=use_ml,
     )
 
     # Estado de exaustão é cache de módulo; limpar garante que execuções
@@ -989,6 +992,7 @@ def run_dual_simulation(
     force_download: bool = False,
     interval: str = "1m",
     save_report: bool = True,
+    use_ml: bool = True,
 ) -> Dict[str, Any]:
     """
     Executa os dois modos (RESEARCH e PAPER_TRADING) e devolve o pacote
@@ -1006,6 +1010,7 @@ def run_dual_simulation(
         symbol=symbol,
         force_download=force_download,
         interval=interval,
+        use_ml=use_ml,
     )
     paper = run_simulation(
         SimulationMode.PAPER_TRADING,
@@ -1016,6 +1021,7 @@ def run_dual_simulation(
         symbol=symbol,
         force_download=force_download,
         interval=interval,
+        use_ml=use_ml,
     )
 
     report_path = (
@@ -1035,6 +1041,7 @@ def run_dual_simulation(
             "symbol": symbol,
             "interval": interval,
             "force_download": force_download,
+            "use_ml": use_ml,
         },
     }
 
@@ -1245,6 +1252,12 @@ def main():
         choices=['1m', '5m', '15m', '1h', '4h', '1d'],
         help='Intervalo do candle para fonte API (default: 1m)',
     )
+    parser.add_argument(
+        '--no-ml',
+        action='store_true',
+        default=False,
+        help='Desliga o filtro ML (ablação reprodutível)',
+    )
 
     args = parser.parse_args()
 
@@ -1265,6 +1278,7 @@ def main():
         symbol=args.symbol,
         force_download=args.refresh,
         interval=args.interval,
+        use_ml=not args.no_ml,
     )
     research_results = bundle["research"]
     paper_results = bundle["paper_trading"]
