@@ -102,6 +102,13 @@ PARAMETER_SPECS: Tuple[ParameterSpec, ...] = (
     ),
     # --------------------------------------------------------------- regime
     ParameterSpec(
+        "REGIME_RISK_EXIT_TICKS", "regime", "int",
+        "Histerese de saída por regime",
+        "Ticks consecutivos em TRANSICAO antes de encerrar por regime_risk. "
+        "ALTA_VOLATILIDADE encerra imediatamente.",
+        1, 100, 1,
+    ),
+    ParameterSpec(
         "CRYPTO_VOL_MULTIPLIER", "regime", "float",
         "Multiplicador cripto",
         "Amplia thresholds e stops para ativos cripto mais voláteis.",

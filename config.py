@@ -63,6 +63,12 @@ MAX_POSITION_AGE_TICKS = {
     "PROTECT": 10      # 3.3 minutos
 }
 
+# Histerese da saída por risco de regime.
+# TRANSICAO costuma durar 1-2 ticks de ruído; exigir N avaliações
+# consecutivas evita fechar a posição antes do take-profit/stop-loss.
+# ALTA_VOLATILIDADE (caos extremo) continua encerrando imediatamente.
+REGIME_RISK_EXIT_TICKS = 3
+
 # Position Sizing
 BASE_POSITION_SIZE_PCT = 0.05  # 5% do equity por posição (base fiduciária)
 MIN_CONFIDENCE_FACTOR = 0.4    # Mínimo 40% mesmo com baixa confiança

@@ -51,6 +51,9 @@ class Position:
     # com as métricas de mercado realmente observadas na entrada.
     regime_metrics: Dict[str, Any] = field(default_factory=dict)
     ml_score: Optional[float] = None
+    # Contador de histerese: avaliações consecutivas em TRANSICAO.
+    # Zerado sempre que o regime volta a ser direcional/consolidação.
+    transition_ticks: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -73,6 +76,7 @@ class Position:
             "details": self.details,
             "regime_metrics": dict(self.regime_metrics),
             "ml_score": self.ml_score,
+            "transition_ticks": self.transition_ticks,
         }
     
     @classmethod
@@ -104,6 +108,7 @@ class Position:
                 if data.get("ml_score") is not None
                 else None
             ),
+            transition_ticks=int(data.get("transition_ticks", 0)),
         )
 
 
@@ -496,12 +501,28 @@ class PositionManager:
         
         # Se não teve stop/take, verificar outras razões
         if not exit_reasons:
-            # PRIORIDADE 2: Regime de risco
-            if regime in ("TRANSICAO", "ALTA_VOLATILIDADE"):
+            # PRIORIDADE 2: Regime de risco (com histerese em TRANSICAO)
+            #
+            # ALTA_VOLATILIDADE (caos extremo) encerra imediatamente por
+            # segurança. TRANSICAO costuma ser ruído de 1 tick: só encerra
+            # após REGIME_RISK_EXIT_TICKS avaliações consecutivas no regime.
+            # Se o mercado voltar à tendência, o contador zera e a posição
+            # segue respirando até take-profit, stop-loss ou max_age.
+            if regime == "ALTA_VOLATILIDADE":
+                position.transition_ticks = 0
                 exit_reasons.append("regime_risk")
-
-            # PRIORIDADE 3: Idade máxima (calculada dinamicamente)
+            elif regime == "TRANSICAO":
+                position.transition_ticks += 1
+                limit = max(
+                    1, int(getattr(config, "REGIME_RISK_EXIT_TICKS", 3))
+                )
+                if position.transition_ticks >= limit:
+                    exit_reasons.append("regime_risk")
             else:
+                position.transition_ticks = 0
+
+            if not exit_reasons:
+                # PRIORIDADE 3: Idade máxima (calculada dinamicamente)
                 max_age = self._get_max_age_for_level()
                 if position.age >= max_age:
                     exit_reasons.append("max_age")
