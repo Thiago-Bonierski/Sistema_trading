@@ -213,6 +213,26 @@ function MlStatusCard({
             ? 'Histórico mínimo atingido.'
             : `Faltam ${formatNumber(minTrades - tradeCount, 0)} trades para o mínimo configurado.`}
         </p>
+        {ml?.training_samples ? (
+          <p className="mt-2 border-t border-white/[0.06] pt-2 text-[10px] text-slate-500">
+            No treino:{' '}
+            <span className="text-emerald-300">
+              {formatNumber(ml.training_samples.live, 0)} reais
+            </span>{' '}
+            ·{' '}
+            <span className="text-sky-300">
+              {formatNumber(ml.training_samples.simulated_historical, 0)} simulações históricas
+            </span>
+            {Number(ml.training_samples.synthetic_ignored) > 0 ? (
+              <>
+                {' '}·{' '}
+                <span className="text-amber-300">
+                  {formatNumber(ml.training_samples.synthetic_ignored, 0)} sintéticos ignorados
+                </span>
+              </>
+            ) : null}
+          </p>
+        ) : null}
       </div>
 
       <div className="mt-3 space-y-1 text-[10px] text-slate-600">

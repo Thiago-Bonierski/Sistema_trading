@@ -349,6 +349,9 @@ class TestSimulationRegressions:
 
         monkeypatch.setattr(config, "TREND_CONFIRMATION_TICKS", 3, raising=False)
         monkeypatch.setattr(config, "MIN_HISTORY_FOR_REGIME", 5, raising=False)
+        # Estes testes verificam a confirmação de tendência, não o filtro ML.
+        # Um runtime_config.json local pode ter desligado o shadow mode.
+        monkeypatch.setattr(config, "ML_SHADOW_MODE", True, raising=False)
 
         class FakeSyntheticMarket:
             def __init__(self, seed=42, n_ticks=10000):
@@ -402,6 +405,9 @@ class TestSimulationRegressions:
         from simular import run_simulation, SimulationMode
 
         monkeypatch.setattr(config, "TREND_CONFIRMATION_TICKS", 1, raising=False)
+        # O teste é sobre atribuição de metadados na saída, não sobre o filtro
+        # ML; não deve depender do shadow mode salvo no runtime_config local.
+        monkeypatch.setattr(config, "ML_SHADOW_MODE", True, raising=False)
 
         class FlippingOrchestrator:
             def __init__(self):

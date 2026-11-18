@@ -60,6 +60,7 @@ from simulation_telemetry import (
     SignalSource as TelemetrySignalSource,
     create_default_raw_signals,
 )
+from trade_origin import simulated_symbol
 
 # Configurar logging
 logger = setup_logging("simulator", config.LOG_LEVEL)
@@ -889,9 +890,13 @@ def run_simulation(
 
             # Salvar trade no banco separado de simulação
             try:
+                # Classifica a origem para que o MLTrainer possa usar como
+                # treino apenas simulações feitas com dados históricos reais.
+                # Se a fonte caiu para sintética no fallback acima, o símbolo
+                # REFLETE essa mudança (não o parâmetro original da chamada).
                 salvar_trade({
                     **trade_result,
-                    "symbol": "SIM_SIMULATION",
+                    "symbol": simulated_symbol(symbol, data_source_enum.value),
                     "aggressiveness": risk_ctrl.aggressiveness_level,
                 })
             except Exception as e:

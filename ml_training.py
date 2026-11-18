@@ -45,6 +45,7 @@ from features import (
     deduplicate_trades,
 )
 from logging_config import setup_logging
+from trade_origin import SYNTHETIC_PREFIX
 
 # Imports opcionais de ML
 try:
@@ -108,19 +109,31 @@ class MLTrainer:
         """
         Carrega histórico de trades do banco.
 
+        Trades de simulação com dados históricos reais (``SIM_{symbol}``)
+        entram normalmente no treino. Apenas as simulações sintéticas
+        (``SIM_SYNTHETIC_{symbol}``) são excluídas: seus preços são inventados
+        e não podem influenciar o modelo usado no mercado real.
+
         Returns:
-            DataFrame com trades executados
+            DataFrame com trades elegíveis para treino
 
         Raises:
             Exception: Se erro ao acessar banco
         """
-        query = "SELECT * FROM trade_history ORDER BY id"
+        query = (
+            "SELECT * FROM trade_history "
+            f"WHERE symbol NOT LIKE '{SYNTHETIC_PREFIX}%' "
+            "ORDER BY id"
+        )
 
         try:
             with db_manager.get_connection() as conn:
                 df = pd.read_sql_query(query, conn)
 
-            logger.info(f"Carregados {len(df)} trades do histórico")
+            logger.info(
+                f"Carregados {len(df)} trades do histórico "
+                "(simulações sintéticas excluídas do treino)"
+            )
             return df
 
         except Exception as e:

@@ -41,6 +41,7 @@ from monitor import (
     state_lock,
 )
 from ml_training import MLTrainer
+from trade_origin import SIMULATED_PREFIX, SYNTHETIC_PREFIX
 
 # Configurar logging
 logger = setup_logging("flask_app", config.LOG_LEVEL)
@@ -167,8 +168,13 @@ def obter_kpis() -> Dict[str, Any]:
             logger.debug("Tabela trade_history não existe ainda")
             return _empty_kpis()
         
-        # Buscar últimos trades
-        query = "SELECT * FROM trade_history ORDER BY id DESC LIMIT 20"
+        # Buscar últimos trades REAIS. Simulações ficam no trade_history para
+        # alimentar o treino, mas não aparecem na Sala de Controle.
+        query = (
+            "SELECT * FROM trade_history "
+            f"WHERE symbol NOT LIKE '{SIMULATED_PREFIX}%' "
+            "ORDER BY id DESC LIMIT 20"
+        )
         with db_manager.get_connection() as conn:
             df = pd.read_sql_query(query, conn)
         
@@ -1060,14 +1066,47 @@ def api_close_all_positions():
 # MACHINE LEARNING
 # ----------------------------------------------------------------------------
 
-def _count_trades() -> int:
+def _count_trainable_trades() -> int:
+    """Quantidade de trades que o MLTrainer efetivamente pode usar."""
     try:
         row = db_manager.fetch_one(
-            "SELECT COUNT(*) AS total FROM trade_history"
+            "SELECT COUNT(*) AS total FROM trade_history "
+            f"WHERE symbol NOT LIKE '{SYNTHETIC_PREFIX}%'"
         )
         return int(row["total"]) if row else 0
     except Exception:
         return 0
+
+
+def _training_sample_counts() -> Dict[str, int]:
+    """Separa o histórico por origem para exibição na aba ML & Console."""
+    empty = {
+        "live": 0,
+        "simulated_historical": 0,
+        "synthetic_ignored": 0,
+    }
+    try:
+        row = db_manager.fetch_one(
+            "SELECT "
+            "SUM(CASE WHEN symbol NOT LIKE ? THEN 1 ELSE 0 END) AS live, "
+            "SUM(CASE WHEN symbol LIKE ? AND symbol NOT LIKE ? "
+            "THEN 1 ELSE 0 END) AS simulated_historical, "
+            "SUM(CASE WHEN symbol LIKE ? THEN 1 ELSE 0 END) "
+            "AS synthetic_ignored "
+            "FROM trade_history",
+            (
+                f"{SIMULATED_PREFIX}%",
+                f"{SIMULATED_PREFIX}%",
+                f"{SYNTHETIC_PREFIX}%",
+                f"{SYNTHETIC_PREFIX}%",
+            ),
+        )
+        if not row:
+            return empty
+        return {key: int(row[key] or 0) for key in empty}
+    except Exception:
+        logger.debug("Não foi possível separar amostras de treino por origem")
+        return empty
 
 
 def _read_json_file(path: Path) -> Optional[Dict[str, Any]]:
@@ -1125,7 +1164,8 @@ def _ml_status_payload() -> Dict[str, Any]:
         "samples_trained": result.get("samples_trained"),
         "samples_tested": result.get("samples_tested"),
         "n_features": result.get("n_features"),
-        "trade_count": _count_trades(),
+        "trade_count": _count_trainable_trades(),
+        "training_samples": _training_sample_counts(),
         "min_trades_for_training": config.MIN_TRADES_FOR_TRAINING,
         "latest_training": latest_report,
     }
@@ -1244,7 +1284,7 @@ def api_ml_train():
             "generated_at": _now_iso(),
             "status": "success",
             "result": result,
-            "trade_count": _count_trades(),
+            "trade_count": _count_trainable_trades(),
         }
 
         try:
