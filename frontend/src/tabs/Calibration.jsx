@@ -23,6 +23,7 @@ import {
   Card,
   LoadingBlock,
   SectionTitle,
+  ToggleSwitch,
 } from '../components/ui.jsx'
 import { formatDateTime, formatNumber } from '../lib/format.js'
 
@@ -76,7 +77,14 @@ function toDraftValues(values) {
   return draft
 }
 
-function normalizeValue(raw) {
+function normalizeValue(raw, type) {
+  if (type === 'bool') {
+    if (typeof raw === 'boolean') return raw
+    if (typeof raw === 'string') {
+      return ['true', '1', 'sim', 'yes', 'on'].includes(raw.trim().toLowerCase())
+    }
+    return Boolean(raw)
+  }
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     return Object.fromEntries(
       Object.entries(raw).map(([key, value]) => [key, Number(value)]),
@@ -100,9 +108,14 @@ function ParameterField({ parameter, draftValue, currentValue, onChange, onRever
   const isDict =
     parameter.type === 'dict_int' ||
     (draftValue && typeof draftValue === 'object')
-  const dirty = !sameValue(normalizeValue(draftValue), currentValue)
+  const dirty = !sameValue(
+    normalizeValue(draftValue, parameter.type),
+    currentValue,
+  )
   const hint = percentHint(parameter.key, draftValue)
   const guidance = parameter.guidance || {}
+  const isBool = parameter.type === 'bool'
+  const isOn = normalizeValue(draftValue, parameter.type) === true
 
   return (
     <div
@@ -162,7 +175,22 @@ function ParameterField({ parameter, draftValue, currentValue, onChange, onRever
         </div>
 
         <div className="flex items-center gap-1.5">
-          {!isDict ? (
+          {isBool ? (
+            <div className="flex items-center gap-2">
+              <span
+                className={`text-[10px] font-semibold ${
+                  isOn ? 'text-emerald-300' : 'text-slate-500'
+                }`}
+              >
+                {isOn ? 'ATIVO' : 'DESATIVADO'}
+              </span>
+              <ToggleSwitch
+                checked={isOn}
+                onChange={(next) => onChange(String(next))}
+                label={parameter.label}
+              />
+            </div>
+          ) : !isDict ? (
             <div className="flex items-center gap-2">
               {hint ? (
                 <span className="text-[10px] font-medium text-emerald-300/80">
@@ -225,7 +253,9 @@ function ParameterField({ parameter, draftValue, currentValue, onChange, onRever
 
       <div className="mt-1.5 flex items-center justify-between text-[9px] text-slate-700">
         <span>
-          mín {parameter.min ?? '—'} · máx {parameter.max ?? '—'}
+          {isBool
+            ? 'verdadeiro / falso'
+            : `mín ${parameter.min ?? '—'} · máx ${parameter.max ?? '—'}`}
         </span>
         <span className="font-mono">{parameter.type}</span>
       </div>
@@ -316,12 +346,26 @@ export default function Calibration() {
     ]
   }, [snapshot])
 
+  const parameterTypes = useMemo(() => {
+    const types = {}
+    ;(snapshot?.categories || []).forEach((category) => {
+      ;(category.parameters || []).forEach((parameter) => {
+        types[parameter.key] = parameter.type
+      })
+    })
+    return types
+  }, [snapshot])
+
   const dirtyKeys = useMemo(() => {
     if (!snapshot) return []
     return Object.keys(draft).filter(
-      (key) => !sameValue(normalizeValue(draft[key]), snapshot.values?.[key]),
+      (key) =>
+        !sameValue(
+          normalizeValue(draft[key], parameterTypes[key]),
+          snapshot.values?.[key],
+        ),
     )
-  }, [draft, snapshot])
+  }, [draft, snapshot, parameterTypes])
 
   const overriddenCount = Object.keys(snapshot?.overrides || {}).length
 
@@ -365,7 +409,7 @@ export default function Calibration() {
 
     const values = {}
     for (const key of dirtyKeys) {
-      const normalized = normalizeValue(draft[key])
+      const normalized = normalizeValue(draft[key], parameterTypes[key])
       if (typeof normalized === 'object') {
         const empty = Object.values(normalized).some(
           (value) => !Number.isFinite(value),

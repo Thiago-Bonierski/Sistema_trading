@@ -65,6 +65,8 @@ export const api = {
 
   mlStatus: () => get('/api/ml/status'),
   trainMl: () => post('/api/ml/train', {}),
+  toggleMl: (enabled) =>
+    post('/api/ml/toggle', enabled === undefined ? {} : { enabled }),
 
   logs: ({ lines = 300, level = '', search = '' } = {}) =>
     get(`/api/logs${query({ lines, level, search })}`),

@@ -54,7 +54,7 @@ class ParameterSpec:
 
     key: str
     category: str
-    kind: str  # "int" | "float" | "dict_int"
+    kind: str  # "int" | "float" | "dict_int" | "bool"
     label: str
     description: str = ""
     minimum: Optional[float] = None
@@ -321,6 +321,12 @@ PARAMETER_SPECS: Tuple[ParameterSpec, ...] = (
         1, 100, 1,
     ),
     # ------------------------------------------------------------------- ml
+    ParameterSpec(
+        "ML_SHADOW_MODE", "ml", "bool",
+        "Filtro ML em modo observação",
+        "Ativo: calcula e registra scores sem bloquear sinais. "
+        "Desativo: o filtro bloqueia sinais reprovados.",
+    ),
     ParameterSpec(
         "ML_APPROVAL_THRESHOLD", "ml", "float",
         "Threshold de aprovação ML",
@@ -737,6 +743,24 @@ PARAMETER_GUIDANCE: Dict[str, Dict[str, str]] = {
         "tip": "Só atua após queda para REDUCED.",
     },
     # ------------------------------------------------------------------- ml
+    "ML_SHADOW_MODE": {
+        "impact_up": (
+            "Ativa a observação: o classificador calcula e registra o score, "
+            "mas NUNCA bloqueia entradas. Útil para validar o modelo em "
+            "produção sem risco operacional."
+        ),
+        "impact_down": (
+            "Ativa o bloqueio: sinais com score abaixo de "
+            "ML_APPROVAL_THRESHOLD são convertidos em NEUTRO. Só funciona "
+            "com um modelo validado (usable=True)."
+        ),
+        "recommended": "Ativo (True) até o modelo provar edge out-of-sample",
+        "tip": (
+            "A API /api/ml/toggle troca este valor e valida o modelo antes "
+            "de desligar o shadow. Artefatos degenerados, legados ou em "
+            "quarentena continuam em observação mesmo com este flag desligado."
+        ),
+    },
     "ML_APPROVAL_THRESHOLD": {
         "impact_up": (
             "Só sinais com score alto passam. Menos trades e maior qualidade "
@@ -1082,8 +1106,26 @@ class RuntimeConfigManager:
         if spec.kind == "dict_int":
             return self._validate_dict_int(spec, value)
 
+        if spec.kind == "bool":
+            return self._validate_bool(spec, value)
+
         raise ConfigValidationError(  # pragma: no cover - contrato interno
             f"Tipo de parâmetro não suportado: {spec.kind}"
+        )
+
+    @staticmethod
+    def _validate_bool(spec: ParameterSpec, value: Any) -> bool:
+        """Aceita booleanos nativos e representações textuais comuns."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("true", "1", "sim", "yes", "on"):
+                return True
+            if normalized in ("false", "0", "nao", "no", "off"):
+                return False
+        raise ConfigValidationError(
+            f"{spec.key} deve ser booleano (recebido: {value!r})"
         )
 
     def _validate_int(self, spec: ParameterSpec, value: Any) -> int:
@@ -1247,6 +1289,9 @@ def _sync_live_engine(snapshot: Dict[str, Any]) -> None:
         classifier = getattr(monitor, "classifier", None)
         if classifier is not None:
             classifier.threshold = float(config.ML_APPROVAL_THRESHOLD)
+            # ML_SHADOW_MODE é copiado no construtor; sincronizar a instância
+            # viva garante efeito imediato do toggle feito pela API.
+            classifier.shadow_mode = bool(config.ML_SHADOW_MODE)
 
         orchestrator = getattr(monitor, "orchestrator", None)
         engines = getattr(orchestrator, "engines", None)

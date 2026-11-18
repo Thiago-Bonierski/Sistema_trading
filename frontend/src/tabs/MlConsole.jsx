@@ -8,6 +8,7 @@ import {
   Loader2,
   RefreshCw,
   Search,
+  ShieldCheck,
   Sparkles,
   Terminal,
   Zap,
@@ -23,6 +24,7 @@ import {
   ProgressBar,
   SectionTitle,
   Spinner,
+  ToggleSwitch,
 } from '../components/ui.jsx'
 import { MlModeBadge, logLevelClass } from '../components/badges.jsx'
 import {
@@ -39,6 +41,78 @@ const LEVELS = [
   { id: 'WARNING', label: 'WARNING' },
   { id: 'ERROR', label: 'ERROR' },
 ]
+
+function MlActivationCard({ ml, toggling, onToggle, notice }) {
+  const usable = Boolean(ml?.usable)
+  const active = usable && ml?.shadow_mode === false
+  const disabled = !usable || toggling
+
+  return (
+    <Card className="p-4 sm:p-5">
+      <SectionTitle
+        icon={ShieldCheck}
+        title="Ativação do Filtro ML"
+        subtitle="Controle se o classificador bloqueia ou apenas observa os sinais."
+      />
+
+      <div
+        className={`mt-4 rounded-xl border p-4 transition ${
+          active
+            ? 'border-emerald-400/25 bg-emerald-400/[0.05]'
+            : 'border-amber-400/25 bg-amber-400/[0.05]'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <Badge variant={active ? 'emerald' : 'amber'}>
+              {active
+                ? 'FILTRO ATIVO — Bloqueando sinais ruins'
+                : 'OBSERVAÇÃO (SHADOW) — Apenas registrando scores'}
+            </Badge>
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+              {active
+                ? 'Sinais abaixo do threshold são convertidos em NEUTRO antes da execução.'
+                : 'O classificador pontua cada sinal, mas nenhuma entrada é bloqueada.'}
+            </p>
+          </div>
+          <ToggleSwitch
+            checked={active}
+            onChange={onToggle}
+            disabled={disabled}
+            size="lg"
+            label="Filtro ML Ativo"
+          />
+        </div>
+
+        <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5">
+          <span className="text-[10px] text-slate-600">
+            {active ? 'Filtro ML Ativo' : 'Modo Observação / Shadow'}
+          </span>
+          <span className="text-[10px] font-semibold text-slate-400">
+            {toggling ? 'Aplicando…' : 'Clique para alternar'}
+          </span>
+        </div>
+      </div>
+
+      {!usable ? (
+        <Alert type="warning" className="mt-3">
+          <span>
+            Treine um modelo válido antes de ativar o bloqueio. O classificador
+            só pode filtrar entradas com um artefato aprovado pelos guardrails.
+            {ml?.disabled_reason
+              ? ` Motivo: ${ml.disabled_reason}.`
+              : ''}
+          </span>
+        </Alert>
+      ) : null}
+      {notice ? (
+        <Alert type={notice.type} className="mt-3">
+          {notice.message}
+        </Alert>
+      ) : null}
+    </Card>
+  )
+}
 
 function MlStatusCard({
   ml,
@@ -190,6 +264,8 @@ export default function MlConsole() {
   const [mlError, setMlError] = useState('')
   const [training, setTraining] = useState(false)
   const [trainNotice, setTrainNotice] = useState(null)
+  const [toggling, setToggling] = useState(false)
+  const [toggleNotice, setToggleNotice] = useState(null)
 
   const [logs, setLogs] = useState([])
   const [logFiles, setLogFiles] = useState([])
@@ -260,6 +336,26 @@ export default function MlConsole() {
     }
   }, [logs, autoScroll])
 
+  async function handleToggle() {
+    const next = !(ml?.usable && ml?.shadow_mode === false)
+    setToggling(true)
+    setToggleNotice(null)
+    try {
+      const payload = await api.toggleMl(next)
+      setToggleNotice({
+        type: 'success',
+        message: payload.enabled
+          ? 'Filtro ativado: sinais abaixo do threshold passarão a ser bloqueados.'
+          : 'Modo observação ativado: os scores continuam sendo registrados.',
+      })
+    } catch (exc) {
+      setToggleNotice({ type: 'error', message: exc.message })
+    } finally {
+      setToggling(false)
+      await loadMl({ silent: true })
+    }
+  }
+
   async function handleTrain() {
     setTraining(true)
     setTrainNotice(null)
@@ -300,6 +396,12 @@ export default function MlConsole() {
       <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
         <div className="space-y-4">
           {mlError ? <Alert type="error">{mlError}</Alert> : null}
+          <MlActivationCard
+            ml={ml}
+            toggling={toggling}
+            onToggle={handleToggle}
+            notice={toggleNotice}
+          />
           <MlStatusCard
             ml={ml}
             loading={mlLoading}

@@ -777,6 +777,12 @@ def run_simulation(
         engine_name = resultado.get("engine", "ProtectFlat")
         ml_score = decision.ml_score
 
+        # O score do tick atual pertence ao SINAL atual, não ao trade que está
+        # sendo fechado. Em saídas por regime_risk/max_age o sinal costuma ser
+        # NEUTRO (score 0.0), por isso o relatório deve usar o score calculado
+        # na ABERTURA e persistido dentro da Position (trade_result).
+        entry_ml_score = ml_score
+
         # Sinal bruto do orquestrador (antes dos filtros) para o funil
         raw_signals = create_default_raw_signals()
         raw_engine_name = decision.raw_signal.get("engine", "ProtectFlat")
@@ -803,6 +809,8 @@ def run_simulation(
         # Fechamento: equity e risco já foram atualizados pelo pipeline
         if decision.intent == OrderIntent.CLOSE and decision.trade_result:
             trade_result = decision.trade_result
+            # Fallback apenas para posições persistidas antes do campo existir.
+            entry_ml_score = trade_result.get("ml_score", ml_score)
             pnl_amount = trade_result["pnl"]
             total_pnl += pnl_amount
             trade_count += 1
@@ -842,7 +850,7 @@ def run_simulation(
                 regime_entry=entry_regime_enum,
                 engine_entry=entry_engine_enum,
                 confidence_entry=entry_confidence,
-                ml_score_entry=ml_score,
+                ml_score_entry=entry_ml_score,
                 entry_price=trade_result.get("entry_price", price),
                 exit_price=trade_result.get("exit_price", price),
                 exit_reason=trade_result.get("reason", "UNKNOWN"),
@@ -874,7 +882,7 @@ def run_simulation(
                 "position_size": trade_result.get("position_size"),
                 "duration_ticks": trade_result.get("duration_ticks", 0),
                 "reason": trade_result.get("reason", "UNKNOWN"),
-                "ml_score": ml_score,
+                "ml_score": entry_ml_score,
                 "result": "WIN" if pnl_amount >= 0 else "LOSS",
                 "mode": mode.value,
             })

@@ -1136,6 +1136,86 @@ def api_ml_status():
     return jsonify({"ok": True, **_ml_status_payload()})
 
 
+@app.route("/api/ml/toggle", methods=["POST"])
+def api_ml_toggle():
+    """
+    Ativa ou desativa o bloqueio do filtro ML.
+
+    - ``enabled=True``  -> ML_SHADOW_MODE=False (bloqueia sinais ruins)
+    - ``enabled=False`` -> ML_SHADOW_MODE=True  (observação / shadow)
+
+    Sem um modelo validado pelos guardrails, a ativação é recusada com
+    HTTP 400 para que um artefato degenerado nunca bloqueie entradas.
+    """
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "JSON inválido"}), 400
+
+    status = _ml_status_payload()
+    currently_active = bool(status.get("usable")) and not bool(
+        status.get("shadow_mode")
+    )
+
+    if "enabled" in payload and payload["enabled"] is not None:
+        raw = payload["enabled"]
+        if isinstance(raw, bool):
+            enabled = raw
+        elif isinstance(raw, str):
+            normalized = raw.strip().lower()
+            if normalized in ("true", "1", "sim", "yes", "on"):
+                enabled = True
+            elif normalized in ("false", "0", "nao", "no", "off"):
+                enabled = False
+            else:
+                return jsonify({
+                    "ok": False,
+                    "error": "enabled deve ser true ou false",
+                }), 400
+        else:
+            return jsonify({
+                "ok": False,
+                "error": "enabled deve ser true ou false",
+            }), 400
+    else:
+        # Sem "enabled", alterna o estado atual.
+        enabled = not currently_active
+
+    if enabled and not status.get("usable"):
+        return jsonify({
+            "ok": False,
+            "enabled": False,
+            "error": (
+                "Não é possível ativar o bloqueio sem um modelo válido. "
+                "Treine um modelo aceito pelos guardrails antes de ativar "
+                "o filtro ML."
+            ),
+            "disabled_reason": status.get("disabled_reason"),
+        }), 400
+
+    shadow_mode = not enabled
+    try:
+        snapshot = runtime_config.update({"ML_SHADOW_MODE": shadow_mode})
+    except ConfigValidationError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    # O listener de runtime_config já propaga para o monitor; garantimos o
+    # estado imediato também quando o app roda sem o monitor carregado.
+    try:
+        classifier.shadow_mode = shadow_mode
+    except Exception:  # pragma: no cover - instância sem atributo
+        logger.debug("Não foi possível sincronizar shadow_mode na instância viva")
+
+    return jsonify({
+        "ok": True,
+        "enabled": enabled,
+        "shadow_mode": shadow_mode,
+        "values": snapshot.get("values", {}),
+        "status": _ml_status_payload(),
+    })
+
+
 @app.route("/api/ml/train", methods=["POST"])
 def api_ml_train():
     """

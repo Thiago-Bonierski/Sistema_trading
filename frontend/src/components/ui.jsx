@@ -187,3 +187,42 @@ export function LoadingBlock({ label = 'Carregando…', className = '' }) {
     </div>
   )
 }
+
+export function ToggleSwitch({
+  checked,
+  onChange,
+  disabled = false,
+  size = 'sm',
+  label = 'Alternar',
+}) {
+  const large = size === 'lg'
+  const track = large ? 'h-8 w-14' : 'h-5 w-9'
+  const thumb = large ? 'h-6 w-6' : 'h-3.5 w-3.5'
+  const shift = large ? 'translate-x-6' : 'translate-x-4'
+
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={Boolean(checked)}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex shrink-0 items-center rounded-full border transition-colors ${track} ${
+        checked
+          ? 'border-emerald-400/40 bg-emerald-500/80'
+          : 'border-white/10 bg-slate-700/80'
+      } ${
+        disabled
+          ? 'cursor-not-allowed opacity-40'
+          : 'cursor-pointer hover:border-white/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50'
+      }`}
+    >
+      <span
+        className={`inline-block transform rounded-full bg-white shadow transition-transform ${thumb} ${
+          checked ? shift : 'translate-x-1'
+        }`}
+      />
+    </button>
+  )
+}
