@@ -713,6 +713,11 @@ def api_simulate():
     try:
         import simular
 
+        # Isolar a requisição de qualquer estado deixado pela anterior:
+        # cache de exaustão e geradores globais são reiniciados antes de
+        # qualquer componente da simulação ser construído.
+        simular.reset_runtime_simulation_state(params["seed"])
+
         bundle = simular.run_dual_simulation(
             ticks=params["ticks"],
             initial_capital=params["capital"],

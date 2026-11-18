@@ -44,6 +44,42 @@ except ImportError:
 # Configurar logging
 logger = setup_logging("ml_classifier", config.LOG_LEVEL)
 
+
+def _force_deterministic_inference(model: Any) -> None:
+    """
+    Força inferência single-thread em estimadores paralelos do pipeline.
+
+    Modelos como RandomForestClassifier(n_jobs=-1) agregam as probabilidades
+    das árvores em uma ordem que depende do escalonamento de threads. O
+    resultado é uma variação de ~1e-16 no `ml_score` entre execuções com
+    entradas bit a bit idênticas — suficiente para quebrar o determinismo da
+    API. A operação matemática é a mesma; apenas a ordem da soma muda.
+
+    Esta função altera somente o paralelismo de inferência. Ela não toca em
+    pesos, threshold, metadata nem nos guardrails de retreino/quarentena.
+    """
+    estimators = [model]
+    named_steps = getattr(model, "named_steps", None)
+    if isinstance(named_steps, dict):
+        estimators.extend(named_steps.values())
+
+    for estimator in estimators:
+        try:
+            params = estimator.get_params(deep=False)
+        except Exception:
+            continue
+        if "n_jobs" in params and params["n_jobs"] != 1:
+            try:
+                estimator.set_params(n_jobs=1)
+                logger.debug(
+                    f"Inferência determinística aplicada a "
+                    f"{type(estimator).__name__} (n_jobs=1)"
+                )
+            except Exception:
+                # Estimadores imutáveis simplesmente permanecem como estão.
+                pass
+
+
 # Mapeamentos de fallback (heurística) para encoding categórico
 REGIME_MAP = {
     "TENDENCIA_ALTA": 1,
@@ -180,6 +216,15 @@ class MLClassifier:
                     self.disabled_reason = "feature_dimension_mismatch"
                     self._last_mtime = None
                     return None
+
+                # Inferência determinística: estimadores com n_jobs=-1 agregam
+                # probabilidades em ordem dependente do escalonamento de
+                # threads. Isso produz variações de ~1e-16 no ml_score entre
+                # execuções idênticas, quebrando a paridade centavo a centavo
+                # da API. A matemática da floresta é a mesma; apenas a ordem
+                # da soma muda, então forçar uma thread preserva o edge
+                # validado nos guardrails.
+                _force_deterministic_inference(model)
 
                 self.model = model
                 self.metadata = metadata

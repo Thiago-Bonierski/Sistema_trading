@@ -31,6 +31,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 import config
@@ -62,6 +63,30 @@ from simulation_telemetry import (
 
 # Configurar logging
 logger = setup_logging("simulator", config.LOG_LEVEL)
+
+
+def reset_runtime_simulation_state(seed: Optional[int] = None) -> None:
+    """
+    Isola uma execução de simulação de qualquer estado deixada por outra.
+
+    Toda chamada à API (ou à CLI) deve começar de um estado idêntico para que
+    duas execuções com os mesmos parâmetros, `refresh=False` e a mesma seed
+    devolvam exatamente os mesmos números. Esta função zera:
+
+    - o cache global de exaustão, que é módulo compartilhado com a produção;
+    - os geradores globais `random` e `numpy.random`, quando há seed.
+
+    Os demais estados de decisão — confirmação de tendência, contadores por
+    regime, posições, equity, risco, classificador e pipeline — já são
+    instâncias locais criadas em `run_simulation` e, portanto, não vazam
+    entre execuções. O reset explícito aqui garante que essa propriedade seja
+    preservada mesmo se um desses componentes passar a usar cache de módulo.
+    """
+    reset_exhaustion_state()
+    if seed is not None:
+        random.seed(seed)
+        # np.random.seed aceita apenas valores em [0, 2**32 - 1].
+        np.random.seed(int(seed) % (2 ** 32))
 
 
 # ============================================================================
@@ -512,6 +537,10 @@ def run_simulation(
     Returns:
         Dicionário com resultados da simulação
     """
+    # Cada execução começa com cache global limpo e RNG determinístico,
+    # independentemente do que uma simulação anterior tenha deixado.
+    reset_runtime_simulation_state(seed)
+
     is_paper = mode == SimulationMode.PAPER_TRADING
     logger.info(
         f"Iniciando simulação em modo {mode.value} "
@@ -1018,6 +1047,10 @@ def run_dual_simulation(
     Returns:
         Dict com research, paper_trading, comparison e report_path.
     """
+    # Reset explícito no ponto de entrada público: garante que duas chamadas
+    # consecutivas (API ou CLI) com os mesmos parâmetros sejam idênticas.
+    reset_runtime_simulation_state(seed)
+
     research = run_simulation(
         SimulationMode.RESEARCH,
         ticks=ticks,

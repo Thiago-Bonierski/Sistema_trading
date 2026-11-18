@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  ArrowDown,
+  ArrowUp,
   BrainCircuit,
   Bitcoin,
   Gauge,
   Info,
+  Lightbulb,
   RotateCcw,
   Save,
   ShieldAlert,
@@ -99,6 +102,7 @@ function ParameterField({ parameter, draftValue, currentValue, onChange, onRever
     (draftValue && typeof draftValue === 'object')
   const dirty = !sameValue(normalizeValue(draftValue), currentValue)
   const hint = percentHint(parameter.key, draftValue)
+  const guidance = parameter.guidance || {}
 
   return (
     <div
@@ -118,11 +122,42 @@ function ParameterField({ parameter, draftValue, currentValue, onChange, onRever
               <Badge variant="emerald">Personalizado</Badge>
             ) : null}
             {dirty ? <Badge variant="amber">Alterado</Badge> : null}
+            {guidance.recommended ? (
+              <Badge variant="sky" title="Faixa recomendada pelo motor">
+                Recomendado: {guidance.recommended}
+              </Badge>
+            ) : null}
           </div>
           {parameter.description ? (
-            <p className="mt-1 text-[10px] leading-relaxed text-slate-600">
+            <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
               {parameter.description}
             </p>
+          ) : null}
+          {guidance.impact_up || guidance.impact_down ? (
+            <div className="mt-2 space-y-1 rounded-lg border border-sky-400/10 bg-sky-400/[0.035] px-2.5 py-2">
+              {guidance.impact_up ? (
+                <p className="flex gap-1.5 text-[10px] leading-relaxed text-slate-400">
+                  <ArrowUp size={11} className="mt-0.5 shrink-0 text-emerald-400" />
+                  <span>
+                    <span className="font-semibold text-emerald-300/90">
+                      Ao aumentar:
+                    </span>{' '}
+                    {guidance.impact_up}
+                  </span>
+                </p>
+              ) : null}
+              {guidance.impact_down ? (
+                <p className="flex gap-1.5 text-[10px] leading-relaxed text-slate-400">
+                  <ArrowDown size={11} className="mt-0.5 shrink-0 text-amber-400" />
+                  <span>
+                    <span className="font-semibold text-amber-300/90">
+                      Ao diminuir:
+                    </span>{' '}
+                    {guidance.impact_down}
+                  </span>
+                </p>
+              ) : null}
+            </div>
           ) : null}
         </div>
 
@@ -179,6 +214,13 @@ function ParameterField({ parameter, draftValue, currentValue, onChange, onRever
             </div>
           ))}
         </div>
+      ) : null}
+
+      {guidance.tip ? (
+        <p className="mt-2 flex gap-1.5 border-t border-white/[0.05] pt-2 text-[10px] leading-relaxed text-slate-500">
+          <Lightbulb size={11} className="mt-0.5 shrink-0 text-violet-400/80" />
+          <span>{guidance.tip}</span>
+        </p>
       ) : null}
 
       <div className="mt-1.5 flex items-center justify-between text-[9px] text-slate-700">
@@ -470,7 +512,8 @@ export default function Calibration() {
         <Alert type="info" className="mt-3">
           <span className="inline-flex items-center gap-1.5">
             <Info size={13} /> Parâmetros percentuais são frações:{' '}
-            <span className="font-mono">0,008 = 0,8%</span>. Campos marcados como
+            <span className="font-mono">0,008 = 0,8%</span>. Cada campo explica o
+            efeito de aumentar/diminuir e mostra a faixa recomendada. Campos
             “personalizado” já possuem override salvo. Alterações só chegam ao
             motor após “Salvar e Aplicar”.
           </span>

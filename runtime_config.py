@@ -341,6 +341,440 @@ PARAMETER_SPECS: Tuple[ParameterSpec, ...] = (
     ),
 )
 
+
+# ============================================================================
+# ORIENTAÇÃO DIDÁTICA DA CALIBRAGEM VISUAL
+# ============================================================================
+#
+# Cada entrada responde a três perguntas que o painel exibe junto do campo:
+# - impact_up:   o que muda quando o valor AUMENTA;
+# - impact_down: o que muda quando o valor DIMINUI;
+# - recommended: faixa considerada segura na calibração atual do motor;
+# - tip:         contexto extra (armadilhas, interações, guardrails).
+#
+# Manter este conteúdo aqui (e não no frontend) garante que CLI, API e painel
+# mostrem exatamente a mesma orientação, sem duplicação de texto.
+
+PARAMETER_GUIDANCE: Dict[str, Dict[str, str]] = {
+    # ---------------------------------------------------------------- stops
+    "DEFAULT_STOP_LOSS_PCT": {
+        "impact_up": (
+            "Dá mais espaço ao preço antes de cortar a perda. Reduz saídas "
+            "por ruído, mas aumenta o prejuízo máximo de cada trade."
+        ),
+        "impact_down": (
+            "Corta perdas mais cedo e protege o capital, porém stop-outs em "
+            "movimentos normais ficam mais frequentes."
+        ),
+        "recommended": "0,005 a 0,02 (0,5% a 2%)",
+        "tip": (
+            "Aplique junto de TAKE_PROFIT: stop muito apertado com alvo "
+            "distante quebra a assimetria da estratégia."
+        ),
+    },
+    "DEFAULT_TAKE_PROFIT_PCT": {
+        "impact_up": (
+            "Exige movimentos maiores para realizar lucro. Aumenta o ganho "
+            "por acerto, mas reduz a taxa de acerto."
+        ),
+        "impact_down": (
+            "Realiza lucro mais cedo e mais vezes, com ticket médio menor e "
+            "maior exposição a custos de transação."
+        ),
+        "recommended": "0,005 a 0,03 (0,5% a 3%)",
+        "tip": "Prefira alvo próximo do stop em regimes de consolidação.",
+    },
+    "BASE_POSITION_SIZE_PCT": {
+        "impact_up": (
+            "Aloca mais equity por posição. Amplifica lucros e prejuízos e "
+            "consome mais rapidamente o limite de drawdown."
+        ),
+        "impact_down": (
+            "Reduz exposição e volatilidade da curva de capital, mas dilui "
+            "o impacto de bons sinais."
+        ),
+        "recommended": "0,02 a 0,10 (2% a 10% do equity)",
+        "tip": "O tamanho final ainda é multiplicado pela confiança do sinal.",
+    },
+    "MIN_CONFIDENCE_FACTOR": {
+        "impact_up": (
+            "Sinais fracos deixam de ser reduzidos tanto: mais trades com "
+            "tamanho relevante e maior risco."
+        ),
+        "impact_down": (
+            "Sinais fracos operam com posição mínima. Filtra ruído, mas pode "
+            "descartar reversões válidas."
+        ),
+        "recommended": "0,2 a 0,5",
+        "tip": "Deve ficar sempre abaixo de MAX_CONFIDENCE_FACTOR.",
+    },
+    "MAX_CONFIDENCE_FACTOR": {
+        "impact_up": (
+            "Permite posições maiores quando a confiança é alta. Aumenta "
+            "retorno potencial e risco de concentração."
+        ),
+        "impact_down": (
+            "Limita o tamanho máximo mesmo em sinais perfeitos. Mais "
+            "conservador e estável."
+        ),
+        "recommended": "1,0 a 2,0",
+        "tip": "O limite de posições por regime continua se aplicando depois deste fator.",
+    },
+    "MAX_POSITION_AGE_TICKS": {
+        "impact_up": (
+            "Posições ficam abertas por mais ticks. Dá tempo ao alvo ser "
+            "atingido, mas prende capital em sinais que já esfriaram."
+        ),
+        "impact_down": (
+            "Fecha posições estagnadas mais rápido e libera slots, porém "
+            "pode cortar movimentos que precisavam de mais tempo."
+        ),
+        "recommended": (
+            "NORMAL 60–120 · REDUCED 20–40 · PROTECT 10–30 ticks"
+        ),
+        "tip": (
+            "Em 1m, 30 ticks ≈ 30 minutos. O modo PAPER usa REDUCED e o "
+            "RESEARCH usa NORMAL."
+        ),
+    },
+    # --------------------------------------------------------------- regime
+    "REGIME_RISK_EXIT_TICKS": {
+        "impact_up": (
+            "Tolera mais ticks consecutivos em TRANSICAO antes de fechar por "
+            "risco de regime. Menos saídas precipitadas, mais exposição em "
+            "momento de incerteza."
+        ),
+        "impact_down": (
+            "Encerra antes em TRANSICAO e protege capital, mas aumenta o "
+            "risco de fechar uma posição que se recuperaria."
+        ),
+        "recommended": "2 a 5 ticks (padrão: 3)",
+        "tip": (
+            "Histerese: ALTA_VOLATILIDADE SEMPRE encerra imediatamente; "
+            "esta régua vale somente para TRANSICAO."
+        ),
+    },
+    "CRYPTO_VOL_MULTIPLIER": {
+        "impact_up": (
+            "Exige movimentos maiores e usa stops mais largos em BTC, ETH e "
+            "SOL. Filtra ruído, mas reduz o número de entradas."
+        ),
+        "impact_down": (
+            "Aproxima cripto dos parâmetros de câmbio. Mais sinais, com "
+            "risco de stop apertado diante da volatilidade real."
+        ),
+        "recommended": "1,0 a 2,0 (padrão mantém a calibração base)",
+        "tip": (
+            "Afeta apenas ativos cripto; USD e outros pares ignoram este "
+            "multiplicador."
+        ),
+    },
+    "MIN_HISTORY_FOR_REGIME": {
+        "impact_up": (
+            "Regime mais estável e menos suscetível a ruído, mas o motor "
+            "leva mais tempo para começar a operar."
+        ),
+        "impact_down": (
+            "Começa a decidir antes, porém com amostra curta o regime "
+            "oscila mais e gera sinais falsos."
+        ),
+        "recommended": "15 a 30 pontos",
+        "tip": "A simulação usa no máximo 100 pontos de histórico deslizante.",
+    },
+    "RANGE_THRESHOLD": {
+        "impact_up": (
+            "Mais janelas são classificadas como CONSOLIDAÇÃO, favorecendo "
+            "MeanReversion."
+        ),
+        "impact_down": (
+            "Menos consolidação detectada; o motor tende a TrendFollowing "
+            "ou rompimento."
+        ),
+        "recommended": "0,001 a 0,005 (0,1% a 0,5%)",
+        "tip": "Interage diretamente com MEAN_REVERSION_BAND_WIDTH.",
+    },
+    "SLOPE_THRESHOLD_SMALL": {
+        "impact_up": "Inclinação mínima maior: movimentos fracos deixam de contar.",
+        "impact_down": "Movimentos pequenos passam a contar como tendência inicial.",
+        "recommended": "0,0001 a 0,0005",
+        "tip": "É a porta de entrada da detectora de tendência.",
+    },
+    "SLOPE_THRESHOLD_MEDIUM": {
+        "impact_up": "Persistência de tendência mais exigente: menos trocas de regime.",
+        "impact_down": "Tendências fracas são confirmadas mais facilmente.",
+        "recommended": "0,0005 a 0,002",
+        "tip": "Use como regime intermediário entre SMALL e LARGE.",
+    },
+    "SLOPE_THRESHOLD_LARGE": {
+        "impact_up": "Só tendências fortes são confirmadas: menos sinais e mais qualidade.",
+        "impact_down": "Tendências moderadas também disparam sinal de entrada.",
+        "recommended": "0,002 a 0,01",
+        "tip": "Valor muito alto desativa na prática a engine TrendFollowing.",
+    },
+    "VOLATILITY_RATIO_THRESHOLD": {
+        "impact_up": (
+            "Só mudanças extremas de volatilidade viram ALTA_VOLATILIDADE."
+        ),
+        "impact_down": (
+            "Pequenas altas de volatilidade bloqueiam entradas com mais "
+            "facilidade."
+        ),
+        "recommended": "1,5 a 3,0",
+        "tip": "Em ALTA_VOLATILIDADE o risco encerra posição imediatamente.",
+    },
+    "CHAOS_VOLATILITY_THRESHOLD": {
+        "impact_up": "Caos exige volatilidade ainda maior: raro e tardio.",
+        "impact_down": "Caos é detectado cedo, bloqueando mais entradas.",
+        "recommended": "2,0 a 5,0",
+        "tip": "Ative com cuidado: trava operações em dias de notícia.",
+    },
+    "CHAOS_RANGE_THRESHOLD": {
+        "impact_up": "Só amplitudes muito grandes caracterizam caos.",
+        "impact_down": "Amplitudes moderadas já bloqueiam o motor.",
+        "recommended": "0,005 a 0,02 (0,5% a 2%)",
+        "tip": "Funciona em conjunto com CHAOS_VOLATILITY_THRESHOLD.",
+    },
+    "CHAOS_MOMENTUM_THRESHOLD": {
+        "impact_up": (
+            "Exige momentum ainda mais fraco para declarar caos com vol alta."
+        ),
+        "impact_down": "Movimentos laterais com vol alta viram caos mais rápido.",
+        "recommended": "0,0005 a 0,003",
+        "tip": "Evite valores baixos em cripto, onde o ruído é natural.",
+    },
+    "TREND_CONFIRMATION_TICKS": {
+        "impact_up": (
+            "Exige mais ticks consecutivos em tendência antes de liberar "
+            "entrada. Filtra falsos começos, mas perde o início do movimento."
+        ),
+        "impact_down": (
+            "Entra mais cedo em tendências, com maior risco de reversão "
+            "logo após a entrada."
+        ),
+        "recommended": "2 a 5 ticks",
+        "tip": (
+            "Este contador é por símbolo e é zerado quando o regime muda; "
+            "posição já aberta não é bloqueada."
+        ),
+    },
+    "TREND_PRICE_THRESHOLD": {
+        "impact_up": (
+            "Só movimentos mais fortes em relação à média disparam "
+            "TrendFollowing. Menos trades e mais seletividade."
+        ),
+        "impact_down": (
+            "Qualquer desvio pequeno gera sinal de tendência. Mais trades, "
+            "porém mais ruído e custo de transação."
+        ),
+        "recommended": "0,003 a 0,006 (0,3% a 0,6%)",
+        "tip": (
+            "A calibração atual usa 0,004. O multiplicador cripto "
+            "eleva o limite efetivo para BTC/ETH/SOL."
+        ),
+    },
+    "TREND_CONFIDENCE": {
+        "impact_up": (
+            "Sinais de tendência recebem mais confiança: posição maior e "
+            "score ML mais alto."
+        ),
+        "impact_down": "Sinais de tendência ficam menores e mais facilmente reprovados.",
+        "recommended": "0,6 a 0,8",
+        "tip": "Afeta o tamanho da posição por meio dos fatores de confiança.",
+    },
+    "MEAN_REVERSION_BAND_WIDTH": {
+        "impact_up": (
+            "Banda mais larga: mais preços entram na zona de reversão. "
+            "Mais sinais, com maior risco de operar contra a tendência."
+        ),
+        "impact_down": (
+            "Banda estreita: só desvios grandes geram reversão. Menos "
+            "trades, porém mais precisos."
+        ),
+        "recommended": "0,0008 a 0,0015 (0,08% a 0,15%)",
+        "tip": (
+            "A calibração atual usa 0,0010. Ajuste junto de "
+            "MEAN_REVERSION_CONFIDENCE e do stop."
+        ),
+    },
+    "MEAN_REVERSION_CONFIDENCE": {
+        "impact_up": "Reversões ganham peso no score ML e alocam mais capital.",
+        "impact_down": "Reversões ficam conservadoras e podem ser filtradas.",
+        "recommended": "0,5 a 0,7",
+        "tip": "Engine mais sensível a RANGE_THRESHOLD.",
+    },
+    "BREAKOUT_THRESHOLD": {
+        "impact_up": (
+            "Rompimento precisa ultrapassar o extremo com folga maior. "
+            "Menos falsos rompimentos, mas entrada mais tardia."
+        ),
+        "impact_down": (
+            "Qualquer aproximação do extremo dispara rompimento. Entra "
+            "cedo, com mais falsos sinais."
+        ),
+        "recommended": "0,0008 a 0,0015 (0,08% a 0,15%)",
+        "tip": "A calibração atual usa 0,0010 com BREAKOUT_CONFIDENCE 0,68.",
+    },
+    "BREAKOUT_MIN_RANGE": {
+        "impact_up": "Só ranges amplos podem romper: menos sinais, mais relevantes.",
+        "impact_down": "Ranges estreitos também rompem: mais sinais e mais ruído.",
+        "recommended": "0,001 a 0,003 (0,1% a 0,3%)",
+        "tip": "Trabalha em conjunto com BREAKOUT_THRESHOLD.",
+    },
+    "BREAKOUT_CONFIDENCE": {
+        "impact_up": "Rompimentos recebem mais confiança e tamanho maior.",
+        "impact_down": "Rompimentos ficam menores e mais facilmente reprovados.",
+        "recommended": "0,6 a 0,75",
+        "tip": "Valor atual: 0,68. Equilibra frequência e qualidade.",
+    },
+    # ----------------------------------------------------------- exhaustion
+    "EXHAUSTION_MIN_HISTORY": {
+        "impact_up": "Avaliação mais estável, porém começa a filtrar mais tarde.",
+        "impact_down": "Filtra antes, com amostra curta e mais falsos positivos.",
+        "recommended": "5 a 20 pontos",
+        "tip": "Abaixo de 2 o filtro é desativado.",
+    },
+    "EXHAUSTION_MOMENTUM_HIGH": {
+        "impact_up": "Só momentum muito alto é considerado candidato a exaustão.",
+        "impact_down": "Movimentos moderados também podem ser marcados como exaustos.",
+        "recommended": "0,002 a 0,01",
+        "tip": "É o gatilho da desaceleração: combine com DECELERATION_MIN.",
+    },
+    "EXHAUSTION_DECELERATION_MIN": {
+        "impact_up": "Exige desaceleração maior: menos bloqueios de entrada.",
+        "impact_down": "Qualquer perda de velocidade bloqueia a entrada.",
+        "recommended": "0,001 a 0,005",
+        "tip": "Valor alto deixa o filtro quase inativo em cripto.",
+    },
+    "EXHAUSTION_WEAK_MOMENTUM": {
+        "impact_up": "Rompimentos com momentum fraco são aceitos com mais facilidade.",
+        "impact_down": "Mais rompimentos suspeitos são bloqueados.",
+        "recommended": "0,0005 a 0,003",
+        "tip": "Critério específico da engine BreakoutMomentum.",
+    },
+    "EXHAUSTION_RANGE_HIGH": {
+        "impact_up": "Só amplitudes grandes disparam exaustão por range.",
+        "impact_down": "Amplitude moderada com momentum fraco já bloqueia.",
+        "recommended": "0,002 a 0,01",
+        "tip": "Trabalha em par com EXHAUSTION_WEAK_MOMENTUM.",
+    },
+    "EXHAUSTION_VOLATILITY_RATIO_HIGH": {
+        "impact_up": "Só saltos extremos de volatilidade ativam o critério.",
+        "impact_down": "Volatilidade um pouco acima da média já bloqueia entradas.",
+        "recommended": "1,5 a 3,0",
+        "tip": "Descontado automaticamente em TRANSICAO/ALTA_VOLATILIDADE.",
+    },
+    "EXHAUSTION_VOLATILITY_MOMENTUM_MAX": {
+        "impact_up": "Permite mais momentum sob volatilidade alta antes de bloquear.",
+        "impact_down": "Bloqueia antes movimentos em meio à volatilidade.",
+        "recommended": "0,0005 a 0,003",
+        "tip": "Use com cuidado: pode neutralizar boas entradas em rompimento.",
+    },
+    # ----------------------------------------------------------------- risk
+    "GLOBAL_TRADE_LIMIT": {
+        "impact_up": "Mais trades por sessão; maior exposição e custo acumulado.",
+        "impact_down": "Encerra a sessão mais cedo e protege capital.",
+        "recommended": "50 a 500 trades por sessão",
+        "tip": "É um teto global, independente do limite por regime.",
+    },
+    "BASE_MAX_TRADES_BY_REGIME": {
+        "impact_up": "Permite mais trades por regime antes do bloqueio de risco.",
+        "impact_down": "Reduz a atividade e preserva capital em regimes específicos.",
+        "recommended": (
+            "TENDENCIA 20–60 · CONSOLIDACAO 10–30 · "
+            "TRANSICAO 5–15 · ALTA_VOL 0–5"
+        ),
+        "tip": (
+            "Contadores são zerados a cada mudança de regime na simulação. "
+            "PROTECT usa limites reduzidos."
+        ),
+    },
+    "MAX_OPEN_POSITIONS": {
+        "impact_up": "Mais posições simultâneas: diversificação e mais exposição total.",
+        "impact_down": "Menos exposição e gestão mais simples.",
+        "recommended": "NORMAL 3–5 · REDUCED 1–2 · PROTECT 1",
+        "tip": "O modo PAPER_TRADING usa REDUCED e, portanto, 1 posição.",
+    },
+    "MAX_OPEN_POSITIONS_BY_SYMBOL": {
+        "impact_up": "Permite multiplicar a exposição no mesmo ativo.",
+        "impact_down": "Evita concentração em um único símbolo.",
+        "recommended": "NORMAL 1–2 · REDUCED 1 · PROTECT 1",
+        "tip": "Conta por símbolo, somado ao limite global de posições.",
+    },
+    "EQUITY_DRAWDOWN_LIMIT": {
+        "impact_up": "Tolera quedas maiores da curva antes de reduzir agressividade.",
+        "impact_down": "Reduz/bloqueia operações mais cedo após perdas.",
+        "recommended": "0,05 a 0,15 (5% a 15%)",
+        "tip": "Na simulação o nível é fixo por modo; em produção acompanha o drawdown real.",
+    },
+    "MIN_CONFIDENCE_FOR_REDUCED": {
+        "impact_up": "Mais sinais passam no modo REDUCED: maior atividade.",
+        "impact_down": "Modo REDUCED fica mais seletivo e conservador.",
+        "recommended": "0,6 a 0,75",
+        "tip": "Aplicável após rebaixamento de agressividade por drawdown.",
+    },
+    "DAILY_LOSS_LIMIT": {
+        "impact_up": "Perde mais antes do kill-switch: mais tempo operando.",
+        "impact_down": "Kill-switch dispara cedo e preserva o capital.",
+        "recommended": "0,02 a 0,05 (2% a 5% do capital)",
+        "tip": "É o gatilho de perda diária; distinto do drawdown acumulado.",
+    },
+    "KILL_SWITCH_HOURS": {
+        "impact_up": "Pausa mais longa depois do kill-switch: mais tempo fora do mercado.",
+        "impact_down": "Volta a operar mais cedo, com risco de reentrar no mesmo cenário.",
+        "recommended": "1 a 24 horas",
+        "tip": "0 desativa a pausa automática.",
+    },
+    "COOLDOWN_AFTER_STOP": {
+        "impact_up": "Demora mais para reentrar após stop-loss: evita revenge trading.",
+        "impact_down": "Reentra rápido, com risco de sucessivos stop-outs.",
+        "recommended": "NORMAL 5–20 · REDUCED 10–30 · PROTECT 30–60 ticks",
+        "tip": "Contado em ticks do timeframe ativo (1m por padrão).",
+    },
+    "MIN_NEW_HIGHS_FOR_REACTIVATION": {
+        "impact_up": "Exige mais confirmação de alta antes de voltar a NORMAL.",
+        "impact_down": "Reativa a agressividade mais cedo.",
+        "recommended": "2 a 5 novos highs",
+        "tip": "Só atua após queda para REDUCED.",
+    },
+    # ------------------------------------------------------------------- ml
+    "ML_APPROVAL_THRESHOLD": {
+        "impact_up": (
+            "Só sinais com score alto passam. Menos trades e maior qualidade "
+            "média, com risco de perder bons sinais."
+        ),
+        "impact_down": (
+            "Mais sinais aprovados. Aumenta frequência e exposição a falsos "
+            "positivos."
+        ),
+        "recommended": "0,55 a 0,70 (atual: 0,58)",
+        "tip": (
+            "Em SHADOW MODE o score é calculado e registrado, mas NÃO "
+            "bloqueia entradas. O filtro só atua com modelo validado e shadow desligado."
+        ),
+    },
+    "MIN_TRADES_FOR_TRAINING": {
+        "impact_up": (
+            "Treino exige mais histórico: modelo mais robusto, porém "
+            "atualizado com menos frequência."
+        ),
+        "impact_down": (
+            "Retreino mais rápido, com risco de overfitting e instabilidade."
+        ),
+        "recommended": "mínimo 30 trades únicos; ideal 200+",
+        "tip": (
+            "GUARDRAIL: o retreino é recusado abaixo de 30 trades únicos e "
+            "sem schema v2. Modelos reprovados ficam em quarentena."
+        ),
+    },
+    "TRAINING_INTERVAL_SECONDS": {
+        "impact_up": "Retreino mais espaçado: modelo estável, porém desatualizado.",
+        "impact_down": "Retreino frequente: acompanha o mercado, mas custa mais e pode instabilizar.",
+        "recommended": "86400 a 604800 s (1 a 7 dias)",
+        "tip": "O intervalo mínimo é respeitado mesmo se houver novos trades.",
+    },
+}
+
+
 class ConfigValidationError(ValueError):
     """Erro de validação de configuração (retornado como HTTP 400)."""
 
@@ -433,6 +867,7 @@ class RuntimeConfigManager:
                     "max": spec.maximum,
                     "step": spec.step,
                     "description": spec.description,
+                    "guidance": _jsonable(PARAMETER_GUIDANCE.get(spec.key, {})),
                     "overridden": spec.key in self._overrides,
                 }
             )
@@ -876,6 +1311,7 @@ runtime_config.register_listener(_sync_live_engine)
 __all__ = [
     "CATEGORY_LABELS",
     "ConfigValidationError",
+    "PARAMETER_GUIDANCE",
     "PARAMETER_SPECS",
     "ParameterSpec",
     "RuntimeConfigManager",
