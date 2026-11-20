@@ -86,6 +86,10 @@ class TradeRecord:
     duration_ticks: int
     final_regime: Regime
     final_engine: SignalSource
+    # Detalhamento de custos (valores padrão preservam construtores antigos).
+    gross_pnl: float = 0.0
+    fees: float = 0.0
+    slippage_cost: float = 0.0
 
 
 # ============================================================================
@@ -265,6 +269,9 @@ class SimulationTelemetry:
                 f"ENTRADA:R$ {trade.entry_price:,.2f} | "
                 f"SAÍDA:R$ {trade.exit_price or 0:,.2f} | "
                 f"MOTIVO:{trade.exit_reason} | "
+                f"BRUTO:R$ {trade.gross_pnl:,.2f} | "
+                f"TAXAS:R$ {trade.fees:,.2f} | "
+                f"SLIPPAGE:R$ {trade.slippage_cost:,.2f} | "
                 f"PNL:R$ {trade.pnl:,.2f} | "
                 f"DURACAO:{trade.duration_ticks} ticks"
             )
@@ -328,6 +335,9 @@ class SimulationTelemetry:
                 "entry_price": t.entry_price,
                 "exit_price": t.exit_price or 0.0,
                 "exit_reason": t.exit_reason,
+                "gross_pnl": t.gross_pnl,
+                "total_fees": t.fees,
+                "slippage_cost": t.slippage_cost,
                 "pnl": t.pnl,
                 "duration_ticks": t.duration_ticks,
                 "final_regime": t.final_regime.value,

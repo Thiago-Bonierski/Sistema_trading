@@ -67,7 +67,7 @@ class TestRuntimeConfigManager:
         isolated, _ = manager
         snapshot = isolated.get_snapshot()
         keys = [category["key"] for category in snapshot["categories"]]
-        assert keys == ["stops", "regime", "exhaustion", "risk", "ml"]
+        assert keys == ["stops", "regime", "exhaustion", "risk", "costs", "ml"]
         assert len(snapshot["values"]) == len(PARAMETER_SPECS)
         assert snapshot["overrides"] == {}
         assert snapshot["updated_at"] is None
@@ -199,7 +199,7 @@ class TestConfigApi:
         assert response.status_code == 200
         body = response.get_json()
         assert body["ok"] is True
-        assert len(body["categories"]) == 5
+        assert len(body["categories"]) == 6
         assert "values" in body and "defaults" in body
 
     def test_post_config_applies_and_persists(self, client, manager):

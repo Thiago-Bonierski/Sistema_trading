@@ -44,6 +44,7 @@ CATEGORY_LABELS: Dict[str, str] = {
     "regime": "Regime de Mercado",
     "exhaustion": "Exaustão",
     "risk": "Risco",
+    "costs": "Custos de Execução",
     "ml": "Machine Learning",
 }
 
@@ -320,6 +321,26 @@ PARAMETER_SPECS: Tuple[ParameterSpec, ...] = (
         "Novos highs necessários para voltar de REDUCED para NORMAL.",
         1, 100, 1,
     ),
+    # ---------------------------------------------------------------- costs
+    ParameterSpec(
+        "TRADING_FEE_PCT", "costs", "float",
+        "Taxa de corretagem por operação",
+        "Comissão cobrada em cada perna (entrada e saída) sobre o valor negociado.",
+        0.0, 0.01, 0.0001,
+    ),
+    ParameterSpec(
+        "SLIPPAGE_PCT", "costs", "float",
+        "Slippage por execução a mercado",
+        "Derrapagem desfavorável aplicada ao preço na abertura e no fechamento.",
+        0.0, 0.01, 0.0001,
+    ),
+    ParameterSpec(
+        "VOLATILE_SLIPPAGE_MULTIPLIER", "costs", "float",
+        "Multiplicador de slippage em regime volátil",
+        "Fator aplicado ao slippage em TRANSICAO e ALTA_VOLATILIDADE.",
+        1.0, 10.0, 0.1,
+    ),
+
     # ------------------------------------------------------------------- ml
     ParameterSpec(
         "ML_SHADOW_MODE", "ml", "bool",
@@ -742,6 +763,54 @@ PARAMETER_GUIDANCE: Dict[str, Dict[str, str]] = {
         "recommended": "2 a 5 novos highs",
         "tip": "Só atua após queda para REDUCED.",
     },
+    # ---------------------------------------------------------------- costs
+    "TRADING_FEE_PCT": {
+        "impact_up": (
+            "Aumenta o custo de cada entrada e saída. Menos trades fecham no "
+            "verde e o equity cresce mais devagar; útil para simular corretoras "
+            "mais caras ou market makers."
+        ),
+        "impact_down": (
+            "Reduz a comissão paga. Com zero, o sistema reproduce o PnL bruto "
+            "histórico, sem custos de corretagem."
+        ),
+        "recommended": "0,001 (0,10% por perna; ~0,20% ida e volta)",
+        "tip": (
+            "A taxa incide sobre o valor negociado na abertura e novamente no "
+            "fechamento. Em spot, 0,10% é o padrão da Binance."
+        ),
+    },
+    "SLIPPAGE_PCT": {
+        "impact_up": (
+            "Piora o preço efetivo: a compra é executada mais cara e a venda "
+            "mais barata. Reduz o PnL mesmo quando a direção está correta."
+        ),
+        "impact_down": (
+            "Aproxima o preço executado do preço observado. Com zero, a "
+            "simulação assume execução exata na última cotação."
+        ),
+        "recommended": "0,0002 (0,02% por execução a mercado)",
+        "tip": (
+            "Não é uma taxa paga à corretora: é a diferença entre o preço "
+            "visto no sinal e o preço realmente negociado."
+        ),
+    },
+    "VOLATILE_SLIPPAGE_MULTIPLIER": {
+        "impact_up": (
+            "Aumenta a derrapagem em TRANSICAO e ALTA_VOLATILIDADE, refletindo "
+            "spread mais aberto em momentos agitados. Pune entradas em ruído."
+        ),
+        "impact_down": (
+            "Aproxima o slippage volátil do normal. Em 1.0 não há agravo em "
+            "regimes instáveis."
+        ),
+        "recommended": "2,0 (dobro do slippage em regime volátil)",
+        "tip": (
+            "Só afeta TRANSICAO e ALTA_VOLATILIDADE. O multiplicador é aplicado "
+            "tanto na abertura quanto no fechamento."
+        ),
+    },
+
     # ------------------------------------------------------------------- ml
     "ML_SHADOW_MODE": {
         "impact_up": (
@@ -1257,6 +1326,15 @@ def _sync_live_engine(snapshot: Dict[str, Any]) -> None:
             if hasattr(position_manager, "take_profit_pct"):
                 position_manager.take_profit_pct = (
                     config.DEFAULT_TAKE_PROFIT_PCT * vol_mult
+                )
+            # Custos de execução usados no cálculo de PnL líquido.
+            if hasattr(position_manager, "trading_fee_pct"):
+                position_manager.trading_fee_pct = float(config.TRADING_FEE_PCT)
+            if hasattr(position_manager, "slippage_pct"):
+                position_manager.slippage_pct = float(config.SLIPPAGE_PCT)
+            if hasattr(position_manager, "volatile_slippage_multiplier"):
+                position_manager.volatile_slippage_multiplier = float(
+                    config.VOLATILE_SLIPPAGE_MULTIPLIER
                 )
 
         risk_controller = getattr(monitor, "risk_controller", None)

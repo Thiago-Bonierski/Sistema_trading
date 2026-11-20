@@ -645,6 +645,9 @@ def run_simulation(
 
     trade_count = 0
     total_pnl = 0.0
+    total_gross_pnl = 0.0
+    total_fees = 0.0
+    total_slippage_cost = 0.0
     win_count = 0
     total_duration = 0
     trades: List[Dict[str, Any]] = []
@@ -813,7 +816,13 @@ def run_simulation(
             # Fallback apenas para posições persistidas antes do campo existir.
             entry_ml_score = trade_result.get("ml_score", ml_score)
             pnl_amount = trade_result["pnl"]
+            gross_pnl = float(trade_result.get("gross_pnl", pnl_amount))
+            trade_fees = float(trade_result.get("total_fees", 0.0))
+            slippage_cost = float(trade_result.get("slippage_cost", 0.0))
             total_pnl += pnl_amount
+            total_gross_pnl += gross_pnl
+            total_fees += trade_fees
+            total_slippage_cost += slippage_cost
             trade_count += 1
             total_duration += trade_result.get("duration_ticks", 0)
             if pnl_amount >= 0:
@@ -856,6 +865,9 @@ def run_simulation(
                 exit_price=trade_result.get("exit_price", price),
                 exit_reason=trade_result.get("reason", "UNKNOWN"),
                 pnl=pnl_amount,
+                gross_pnl=gross_pnl,
+                fees=trade_fees,
+                slippage_cost=slippage_cost,
                 duration_ticks=trade_result.get("duration_ticks", 0),
                 final_regime=final_regime_enum,
                 final_engine=final_engine_enum,
@@ -879,6 +891,9 @@ def run_simulation(
                 "exit_regime": trade_result.get("exit_regime", regime),
                 "engine": entry_engine_name,
                 "confidence": entry_confidence,
+                "gross_pnl": round(gross_pnl, 6),
+                "fees": round(trade_fees, 6),
+                "slippage_cost": round(slippage_cost, 6),
                 "pnl": round(float(pnl_amount), 6),
                 "position_size": trade_result.get("position_size"),
                 "duration_ticks": trade_result.get("duration_ticks", 0),
@@ -962,7 +977,13 @@ def run_simulation(
         'data_source': data_source,
         'initial_capital': initial_capital,
         'final_equity': equity_mgr.current_equity,
+        # `total_pnl` permanece como PnL líquido (compatibilidade); os
+        # demais campos explicitam a composição dos custos de execução.
         'total_pnl': round(total_pnl, 6),
+        'gross_pnl': round(total_gross_pnl, 6),
+        'total_fees': round(total_fees, 6),
+        'slippage_cost': round(total_slippage_cost, 6),
+        'net_pnl': round(total_pnl, 6),
         'total_return': equity_mgr.get_total_return(),
         'max_drawdown': equity_mgr.get_max_equity_drawdown(),
         'trade_statistics': trade_statistics,
@@ -1238,12 +1259,21 @@ def _print_summary(
     print("📊 RESUMO DA SIMULAÇÃO (componentes reais)")
     print("=" * 60)
 
+    def _cost_lines(results: Dict[str, Any]) -> str:
+        return (
+            f"    • PnL Bruto:   R$ {results['gross_pnl']:+,.2f}\n"
+            f"    • Slippage:    R$ -{results['slippage_cost']:,.2f}\n"
+            f"    • Taxas:       R$ -{results['total_fees']:,.2f}\n"
+            f"    • PnL Líquido: R$ {results['net_pnl']:+,.2f}"
+        )
+
     print(f"\n  🔬 RESEARCH MODE (seed={seed}):")
     print(f"    • Trades:      {research_results['trade_statistics']['total_trades']}")
     print(f"    • Win Rate:    {research_results['trade_statistics']['win_rate']:.1%}")
     print(f"    • Max DD:      {research_results['max_drawdown']:.1%}")
     print(f"    • Return:      {research_results['total_return']:.1%}")
     print(f"    • Final Eq:    R$ {research_results['final_equity']:,.2f}")
+    print(_cost_lines(research_results))
 
     print(f"\n  📄 PAPER TRADING MODE (seed={seed}):")
     print(f"    • Trades:      {paper_results['trade_statistics']['total_trades']}")
@@ -1251,6 +1281,7 @@ def _print_summary(
     print(f"    • Max DD:      {paper_results['max_drawdown']:.1%}")
     print(f"    • Return:      {paper_results['total_return']:.1%}")
     print(f"    • Final Eq:    R$ {paper_results['final_equity']:,.2f}")
+    print(_cost_lines(paper_results))
 
     research_trades = research_results['trade_statistics']['total_trades']
     paper_trades = paper_results['trade_statistics']['total_trades']

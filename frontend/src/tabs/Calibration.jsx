@@ -4,6 +4,7 @@ import {
   ArrowUp,
   BrainCircuit,
   Bitcoin,
+  Coins,
   Gauge,
   Info,
   Lightbulb,
@@ -44,6 +45,8 @@ const PERCENT_HINTS = new Set([
   'BASE_POSITION_SIZE_PCT',
   'EQUITY_DRAWDOWN_LIMIT',
   'DAILY_LOSS_LIMIT',
+  'TRADING_FEE_PCT',
+  'SLIPPAGE_PCT',
 ])
 
 const SECTION_ICONS = {
@@ -52,6 +55,7 @@ const SECTION_ICONS = {
   risk: ShieldCheck,
   regime: Gauge,
   exhaustion: Waves,
+  costs: Coins,
   ml: BrainCircuit,
 }
 
@@ -299,6 +303,7 @@ export default function Calibration() {
     const regime = categories.regime?.parameters || []
     const exhaustion = categories.exhaustion?.parameters || []
     const risk = categories.risk?.parameters || []
+    const costs = categories.costs?.parameters || []
     const ml = categories.ml?.parameters || []
 
     const crypto = regime.filter((parameter) => parameter.key === 'CRYPTO_VOL_MULTIPLIER')
@@ -336,6 +341,12 @@ export default function Calibration() {
         title: 'Filtros de Exaustão',
         subtitle: 'Critérios que bloqueiam entradas no fim do movimento.',
         parameters: exhaustion,
+      },
+      {
+        id: 'costs',
+        title: 'Custos de Execução',
+        subtitle: 'Corretagem por perna, derrapagem e agravo em regime volátil.',
+        parameters: costs,
       },
       {
         id: 'ml',

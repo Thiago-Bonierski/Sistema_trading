@@ -30,6 +30,7 @@ class Position:
         engine: Engine que gerou o sinal
         confidence: Confiança do sinal (0.0 a 1.0)
         details: Detalhes adicionais do sinal
+        entry_fee: Comissão paga na abertura (position_size * TRADING_FEE_PCT)
         
     Note:
         max_age_ticks é CALCULADO DINAMICAMENTE baseado no RiskController.
@@ -54,6 +55,9 @@ class Position:
     # Contador de histerese: avaliações consecutivas em TRANSICAO.
     # Zerado sempre que o regime volta a ser direcional/consolidação.
     transition_ticks: int = 0
+    # Fee da perna de entrada, travada na abertura para não mudar se a
+    # calibragem for alterada enquanto a posição está aberta.
+    entry_fee: float = 0.0
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -77,6 +81,7 @@ class Position:
             "regime_metrics": dict(self.regime_metrics),
             "ml_score": self.ml_score,
             "transition_ticks": self.transition_ticks,
+            "entry_fee": self.entry_fee,
         }
     
     @classmethod
@@ -109,6 +114,7 @@ class Position:
                 else None
             ),
             transition_ticks=int(data.get("transition_ticks", 0)),
+            entry_fee=float(data.get("entry_fee", 0.0) or 0.0),
         )
 
 
@@ -152,12 +158,97 @@ class PositionManager:
         self.stop_loss_pct = config.DEFAULT_STOP_LOSS_PCT * self._vol_mult
         self.take_profit_pct = config.DEFAULT_TAKE_PROFIT_PCT * self._vol_mult
 
+        # Custos de execução. Espelham `config` e são atualizados pelo
+        # runtime_config em calibragem ao vivo (ver _sync_live_engine).
+        self.trading_fee_pct = float(config.TRADING_FEE_PCT)
+        self.slippage_pct = float(config.SLIPPAGE_PCT)
+        self.volatile_slippage_multiplier = float(
+            config.VOLATILE_SLIPPAGE_MULTIPLIER
+        )
+
         logger.info(
             f"PositionManager inicializado: symbol={symbol}, "
             f"vol_mult={self._vol_mult}x, "
             f"SL={self.stop_loss_pct:.1%}, TP={self.take_profit_pct:.1%}"
         )
     
+    @staticmethod
+    def _is_volatile_regime(regime: str) -> bool:
+        """Regimes em que o spread abre e a derrapagem é agravada."""
+        return regime in ("TRANSICAO", "ALTA_VOLATILIDADE")
+
+    def _slippage_for(self, regime: str) -> float:
+        """
+        Slippage efetivo de uma execução no regime informado.
+
+        O multiplicador volátil incide sobre TRANSICAO e ALTA_VOLATILIDADE,
+        tanto na abertura quanto no fechamento.
+        """
+        base = max(0.0, float(self.slippage_pct))
+        if self._is_volatile_regime(regime):
+            multiplier = max(0.0, float(self.volatile_slippage_multiplier))
+            return base * multiplier
+        return base
+
+    def _execution_costs(
+        self,
+        position: Position,
+        exit_price: float,
+        exit_regime: str,
+    ) -> Dict[str, float]:
+        """
+        Calcula preços efetivos, PnL bruto e custos de uma saída.
+
+        O slippage é sempre desfavorável: compra-executa mais caro e venda
+        executa mais barato. A comissão incide sobre o notional da posição
+        em cada perna (entrada já travada em `position.entry_fee`).
+        """
+        entry_slippage = self._slippage_for(position.regime)
+        exit_slippage = self._slippage_for(exit_regime)
+
+        if position.side == "COMPRA":
+            entry_effective = position.entry_price * (1.0 + entry_slippage)
+            exit_effective = exit_price * (1.0 - exit_slippage)
+            pnl_without_costs = (
+                position.position_size
+                * (exit_price - position.entry_price)
+                / position.entry_price
+            )
+            gross_pnl = (
+                position.position_size
+                * (exit_effective - entry_effective)
+                / entry_effective
+            )
+        else:
+            entry_effective = position.entry_price * (1.0 - entry_slippage)
+            exit_effective = exit_price * (1.0 + exit_slippage)
+            pnl_without_costs = (
+                position.position_size
+                * (position.entry_price - exit_price)
+                / position.entry_price
+            )
+            gross_pnl = (
+                position.position_size
+                * (entry_effective - exit_effective)
+                / entry_effective
+            )
+
+        entry_fee = float(position.entry_fee)
+        exit_fee = position.position_size * max(0.0, float(self.trading_fee_pct))
+        total_fees = entry_fee + exit_fee
+
+        return {
+            "entry_price_effective": entry_effective,
+            "exit_price_effective": exit_effective,
+            "pnl_without_costs": pnl_without_costs,
+            "gross_pnl": gross_pnl,
+            "slippage_cost": pnl_without_costs - gross_pnl,
+            "entry_fee": entry_fee,
+            "exit_fee": exit_fee,
+            "total_fees": total_fees,
+            "net_pnl": gross_pnl - total_fees,
+        }
+
     def _get_max_age_for_level(self) -> int:
         """
         Retorna max_age baseado no nível de agressividade.
@@ -262,6 +353,7 @@ class PositionManager:
             take_profit = price * (1 - self.take_profit_pct)
         
         position_size = self._calculate_position_size(confidence)
+        entry_fee = position_size * max(0.0, float(self.trading_fee_pct))
         
         position = Position(
             side=side,
@@ -276,12 +368,13 @@ class PositionManager:
             details=details,
             regime_metrics=dict(regime_metrics or {}),
             ml_score=ml_score,
+            entry_fee=entry_fee,
         )
         
         logger.info(
             f"Posição construída: {symbol} {side} @ {price:.2f} "
             f"(SL: {stop_loss:.2f}, TP: {take_profit:.2f}, "
-            f"Size: R$ {position_size:,.2f})"
+            f"Size: R$ {position_size:,.2f}, Fee: R$ {entry_fee:,.2f})"
         )
         
         return position
@@ -363,17 +456,10 @@ class PositionManager:
             logger.warning(f"Tentativa de fechar posição inexistente: {symbol}")
             return None
         
-        # Calcular PnL como valor absoluto
-        if position.side == "COMPRA":
-            pnl_amount = (
-                position.position_size * 
-                (exit_price - position.entry_price) / position.entry_price
-            )
-        else:
-            pnl_amount = (
-                position.position_size * 
-                (position.entry_price - exit_price) / position.entry_price
-            )
+        # PnL com custos reais de execução: slippage desfavorável nas duas
+        # pernas + comissão na entrada (travada) e na saída.
+        costs = self._execution_costs(position, exit_price, exit_regime)
+        pnl_amount = costs["net_pnl"]
         
         # Cooldown extra após stop-loss
         if self.risk_controller and "stop_loss" in reason.lower():
@@ -397,6 +483,16 @@ class PositionManager:
             "engine": position.engine,
             "confidence": position.confidence,
             "pnl": float(pnl_amount),
+            # Detalhamento de custos (auditoria e relatórios)
+            "gross_pnl": float(costs["gross_pnl"]),
+            "fees": float(costs["total_fees"]),
+            "entry_fee": float(costs["entry_fee"]),
+            "exit_fee": float(costs["exit_fee"]),
+            "total_fees": float(costs["total_fees"]),
+            "slippage_cost": float(costs["slippage_cost"]),
+            "pnl_without_costs": float(costs["pnl_without_costs"]),
+            "entry_price_effective": float(costs["entry_price_effective"]),
+            "exit_price_effective": float(costs["exit_price_effective"]),
             "position_size": position.position_size,
             "duration_ticks": position.age,
             "reason": reason,
@@ -413,7 +509,10 @@ class PositionManager:
         
         logger.info(
             f"🔴 Posição fechada: {symbol} {position.side} | "
-            f"PnL: {pnl_amount:+.2f} | Razão: {reason}"
+            f"PnL: {pnl_amount:+.2f} | "
+            f"Bruto: {costs['gross_pnl']:+.2f} | "
+            f"Taxas: {costs['total_fees']:.2f} | "
+            f"Slippage: {costs['slippage_cost']:.2f} | Razão: {reason}"
         )
         
         return trade_result

@@ -162,6 +162,21 @@ EXHAUSTION_VOLATILITY_RATIO_HIGH = 2.5
 EXHAUSTION_VOLATILITY_MOMENTUM_MAX = 0.012
 
 # ============================================================================
+# CUSTOS DE EXECUÇÃO
+# ============================================================================
+
+# Taxa de corretagem cobrada em CADA perna da operação (entrada e saída).
+# 0,10% é a taxa padrão Spot da Binance: ida e volta custam ~0,20%.
+TRADING_FEE_PCT = 0.001
+
+# Derrapagem média assumida em uma execução a mercado. É aplicada de forma
+# desfavorável: + na compra e - na venda (e invertido no fechamento).
+SLIPPAGE_PCT = 0.0002
+
+# Em TRANSICAO / ALTA_VOLATILIDADE o spread abre; multiplica o slippage.
+VOLATILE_SLIPPAGE_MULTIPLIER = 2.0
+
+# ============================================================================
 # STRATEGY ENGINES
 # ============================================================================
 

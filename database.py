@@ -220,6 +220,7 @@ class DatabaseManager:
                     engine TEXT,
                     confidence REAL,
                     details TEXT,
+                    entry_fee REAL NOT NULL DEFAULT 0,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -354,6 +355,13 @@ def init_database() -> None:
         ("trade_history", "volatility_ratio", "REAL"),
         ("trade_history", "ml_score", "REAL"),
         ("trade_history", "feature_schema_version", "INTEGER"),
+        # Custos de execução por trade (PnL líquido é auditável).
+        ("trade_history", "gross_pnl", "REAL"),
+        ("trade_history", "slippage_cost", "REAL"),
+        ("trade_history", "entry_fee", "REAL"),
+        ("trade_history", "exit_fee", "REAL"),
+        ("trade_history", "total_fees", "REAL"),
+        ("positions", "entry_fee", "REAL"),
     ]
 
     for table, column, col_type in migrations:
@@ -414,6 +422,15 @@ def salvar_trade(trade_result: dict) -> None:
         "ml_score": None,
         "feature_schema_version": config.ML_FEATURE_SCHEMA_VERSION,
     }
+    # Trades gravados antes dos custos não tinham esses campos: 0.0 mantém
+    # o PnL histórico coerente sem quebrar a leitura.
+    cost_defaults = {
+        "gross_pnl": 0.0,
+        "slippage_cost": 0.0,
+        "entry_fee": 0.0,
+        "exit_fee": 0.0,
+        "total_fees": 0.0,
+    }
 
     base_params = (
         trade_result["symbol"],
@@ -439,13 +456,19 @@ def salvar_trade(trade_result: dict) -> None:
             entry_regime, exit_regime, engine, confidence, pnl, position_size,
             duration_ticks, reason, aggressiveness,
             slope, momentum, range_rel, volatility_ratio, ml_score,
-            feature_schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            feature_schema_version,
+            gross_pnl, slippage_cost, entry_fee, exit_fee, total_fees
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?)
     """
 
-    params = base_params + tuple(
-        trade_result.get(key, default)
-        for key, default in feature_defaults.items()
+    params = (
+        base_params
+        + tuple(
+            trade_result.get(key, default)
+            for key, default in feature_defaults.items()
+        )
+        + tuple(trade_result.get(key, default) for key, default in cost_defaults.items())
     )
 
     try:
@@ -487,8 +510,9 @@ def save_positions(positions: Dict[str, Dict[str, Any]]) -> None:
             cursor.execute("""
                 INSERT INTO positions
                 (symbol, side, entry_price, stop_loss, take_profit, entry_tick,
-                 position_size, age, regime, engine, confidence, details, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 position_size, age, regime, engine, confidence, details,
+                 entry_fee, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 symbol,
                 p["side"],
@@ -502,6 +526,7 @@ def save_positions(positions: Dict[str, Dict[str, Any]]) -> None:
                 p.get("engine", ""),
                 p.get("confidence", 0.0),
                 p.get("details", ""),
+                p.get("entry_fee", 0.0),
                 datetime.now().isoformat(),
             ))
 
@@ -652,14 +677,15 @@ def save_all_state(
             cursor.execute("""
                 INSERT INTO positions
                 (symbol, side, entry_price, stop_loss, take_profit, entry_tick,
-                 position_size, age, regime, engine, confidence, details, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 position_size, age, regime, engine, confidence, details,
+                 entry_fee, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 symbol, p["side"], p["entry_price"], p["stop_loss"],
                 p["take_profit"], p["entry_tick"], p["position_size"],
                 p.get("age", 0), p.get("regime", ""), p.get("engine", ""),
                 p.get("confidence", 0.0), p.get("details", ""),
-                datetime.now().isoformat(),
+                p.get("entry_fee", 0.0), datetime.now().isoformat(),
             ))
 
         # Equity
