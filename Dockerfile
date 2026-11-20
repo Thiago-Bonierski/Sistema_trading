@@ -20,17 +20,25 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
-# UID/GID 1000 por default: os volumes bind-mountados pelo compose pertencem ao
-# usuário do host, então o processo não-root precisa do mesmo dono para gravar.
+# UID/GID 1000 por default: no Linux os volumes bind-mountados pertencem ao
+# usuario do host, entao o processo nao-root precisa do mesmo dono para gravar.
+#
+# Windows/WSL2: diretorios montados de C:\ aparecem como root:root dentro da VM.
+# O docker_start.bat define USER_UID=0/USER_GID=0 para evitar "permission denied"
+# ao gravar em ./docker_data, ./docker_models, ./logs e ./simulation_reports.
 ARG USER_UID=1000
 ARG USER_GID=1000
-RUN groupadd --gid ${USER_GID} appuser \
- && useradd --uid ${USER_UID} --gid ${USER_GID} --no-create-home \
-      --home-dir /app --shell /usr/sbin/nologin appuser \
+RUN if [ "${USER_UID}" != "0" ]; then \
+      groupadd --gid ${USER_GID} appuser \
+      && useradd --uid ${USER_UID} --gid ${USER_GID} --no-create-home \
+           --home-dir /app --shell /usr/sbin/nologin appuser; \
+    fi \
  && mkdir -p /app/data /app/models /app/logs /app/reports /app/simulation_reports \
- && chown -R appuser:appuser /app
+ && chown -R ${USER_UID}:${USER_GID} /app \
+ && chmod -R 775 /app/data /app/models /app/logs /app/reports /app/simulation_reports
 
-USER appuser
+# USER numerico funciona tanto para appuser (Linux) quanto para root (Windows).
+USER ${USER_UID}:${USER_GID}
 
 EXPOSE 5000
 

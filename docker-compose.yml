@@ -4,7 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # Deve coincidir com o dono dos volumes no host (padrão no Linux).
+        # Linux: dono dos volumes no host. Windows/WSL2: use 0/0
+        # (o docker_start.bat define automaticamente).
         USER_UID: ${USER_UID:-1000}
         USER_GID: ${USER_GID:-1000}
     container_name: trading-requiem-backend
