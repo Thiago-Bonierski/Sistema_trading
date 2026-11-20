@@ -1,0 +1,35 @@
+# Ambientes e dependências locais
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Frontend (reconstruído dentro da imagem)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Controle de versão e segredos
+.git/
+.gitignore
+.env
+
+# Dados voláteis / locais — montados como volumes pelo compose
+runtime_config.json
+data_cache/
+logs/
+simulation_reports/
+reports/
+docker_data/
+docker_models/
+*.db
+*.db-journal
+*.db-wal
+*.joblib
+*.log
+*.log.*
+
+# Arquivos gerados localmente
+*.json.bak

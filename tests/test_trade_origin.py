@@ -16,6 +16,7 @@ from contextlib import contextmanager
 import pytest
 
 import app as app_module
+import config
 import ml_training
 import simular
 from database import DatabaseManager
@@ -108,6 +109,10 @@ class TestClassificacaoOrigem:
         assert is_synthetic("SIM_SYNTHETIC_BTC") is True
 
     def test_simulacao_sintetica_grava_prefixo_sintetico(self, monkeypatch):
+        # O classificador da simulação lê config.ML_SHADOW_MODE na construção;
+        # forçar shadow garante trades mesmo se o runtime_config local estiver
+        # com ML_SHADOW_MODE=false (toggle feito pelo painel).
+        monkeypatch.setattr(config, "ML_SHADOW_MODE", True, raising=False)
         captured = []
         monkeypatch.setattr(
             simular, "salvar_trade", lambda trade: captured.append(trade)

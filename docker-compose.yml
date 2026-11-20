@@ -1,0 +1,54 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Deve coincidir com o dono dos volumes no host (padrão no Linux).
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    container_name: trading-requiem-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # O Flask precisa escutar em todas as interfaces dentro do container.
+      FLASK_HOST: 0.0.0.0
+      FLASK_PORT: "5000"
+      # Diretórios persistentes esperados pelo config.py.
+      TRADING_DATA_DIR: /app/data
+      TRADING_MODELS_DIR: /app/models
+      TRADING_REPORTS_DIR: /app/data/reports
+      TRADING_LOG_DIR: /app/logs
+      TRADING_SIMULATION_REPORTS_DIR: /app/simulation_reports
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./docker_data:/app/data
+      - ./docker_models:/app/models
+      - ./logs:/app/logs
+      - ./simulation_reports:/app/simulation_reports
+    expose:
+      - "5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/api/status', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: trading-requiem-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

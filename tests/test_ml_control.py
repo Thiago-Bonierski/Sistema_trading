@@ -112,6 +112,10 @@ class TestMlScoreDeEntrada:
         assert restored.ml_score == pytest.approx(0.8123)
 
     def test_relatorio_da_simulacao_usa_score_da_abertura(self, monkeypatch, tmp_path):
+        # A simulação precisa gerar trades: o runtime_config.json local pode ter
+        # ML_SHADOW_MODE=false (toggle feito pelo painel), o que bloquearia as
+        # entradas e deixaria `captured` vazio.
+        monkeypatch.setattr(config, "ML_SHADOW_MODE", True, raising=False)
         captured = []
         real_close = PositionManager.close_position
 

@@ -32,15 +32,29 @@ CLOSE_POSITION_ON_DATA_GAP = True
 # PATHS E ARQUIVOS
 # ============================================================================
 BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / 'historico.db'
-REPORTS_DIR = BASE_DIR / 'reports'
-SIMULATION_REPORTS_DIR = BASE_DIR / 'simulation_reports'
-ML_MODEL_PATH = BASE_DIR / 'ml_model.joblib'
-LOG_DIR = BASE_DIR / 'logs'
-RUNTIME_CONFIG_PATH = BASE_DIR / 'runtime_config.json'
+
+
+def _env_path(name: str, default: Path) -> Path:
+    """Diretório configurável por ambiente (usado pelo Docker Compose)."""
+    value = os.getenv(name)
+    return Path(value).expanduser() if value else default
+
+
+# Os defaults preservam o layout local histórico. No Docker, o compose aponta
+# cada caminho para um volume persistente (/app/data, /app/models, /app/logs).
+DATA_DIR = _env_path("TRADING_DATA_DIR", BASE_DIR)
+MODELS_DIR = _env_path("TRADING_MODELS_DIR", BASE_DIR)
+DB_PATH = DATA_DIR / 'historico.db'
+RUNTIME_CONFIG_PATH = DATA_DIR / 'runtime_config.json'
+REPORTS_DIR = _env_path("TRADING_REPORTS_DIR", BASE_DIR / 'reports')
+SIMULATION_REPORTS_DIR = _env_path(
+    "TRADING_SIMULATION_REPORTS_DIR", BASE_DIR / 'simulation_reports'
+)
+ML_MODEL_PATH = MODELS_DIR / 'ml_model.joblib'
+LOG_DIR = _env_path("TRADING_LOG_DIR", BASE_DIR / 'logs')
 
 # Criar diretórios se não existirem
-for directory in [REPORTS_DIR, SIMULATION_REPORTS_DIR, LOG_DIR]:
+for directory in [DATA_DIR, MODELS_DIR, REPORTS_DIR, SIMULATION_REPORTS_DIR, LOG_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================

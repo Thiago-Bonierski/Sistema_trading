@@ -357,6 +357,71 @@ cd frontend && npm install && cd ..
 
 ---
 
+## Como rodar com Docker (`docker compose up -d --build`)
+
+Pré-requisitos: Docker Engine 24+ com Compose Plugin (ou Docker Desktop).
+Não é necessário instalar Python, Node, venv ou dependências na máquina host.
+
+**1. Configure o `.env`** (o compose carrega esse arquivo automaticamente):
+
+```bash
+cp .env.example .env
+# preencha BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET
+# EXECUTION_MODE=TESTNET  (PAPER é o default seguro)
+# ALLOW_LIVE_TRADING=False  <-- nunca altere sem querer operar com dinheiro real
+```
+
+**2. (Opcional) Semee os volumes com o estado atual**, se estiver migrando de uma
+instalação local:
+
+```bash
+mkdir -p docker_data docker_models
+cp historico.db docker_data/          # banco + estado vivo
+cp ml_model.joblib docker_models/     # classificador já treinado
+```
+
+> Sem o modelo no volume, o classificador entra em modo observador (shadow) até
+> o próximo treino. O banco é criado vazio automaticamente se não existir.
+
+**3. Suba tudo:**
+
+```bash
+docker compose up -d --build
+```
+
+O frontend fica disponível em **http://localhost:8080**. O backend Flask escuta
+apenas na rede interna do Compose (`backend:5000`); o Nginx faz o proxy de
+`/api/` para ele, então **uma única porta** precisa ser aberta no firewall.
+
+**Comandos úteis:**
+
+```bash
+docker compose ps                       # status e healthcheck dos dois serviços
+docker compose logs -f backend          # acompanhar o motor em tempo real
+docker compose logs -f frontend
+docker compose restart backend          # reiniciar sem perder dados
+docker compose down && docker compose up -d --build   # atualizar a imagem
+```
+
+**Volumes persistentes** (sobrevivem a `down`, `restart` e atualizações):
+
+| Caminho no host | Caminho no container | Conteúdo |
+|---|---|---|
+| `./docker_data` | `/app/data` | `historico.db`, `runtime_config.json`, relatórios de treino |
+| `./docker_models` | `/app/models` | `ml_model.joblib` |
+| `./logs` | `/app/logs` | logs rotacionados do motor e da API |
+| `./simulation_reports` | `/app/simulation_reports` | relatórios JSON das simulações |
+
+> Em hosts cujo usuário não é UID/GID 1000, exporte `USER_UID`/`USER_GID`
+> antes do build (ou ajuste o `docker-compose.yml`) para que o usuário não-root
+> do container continue podendo gravar nos volumes.
+
+Se o daemon Docker não estiver disponível, valide o arquivo com
+`docker compose config` em outra máquina — a sintaxe do `docker-compose.yml`
+foi verificada neste repositório.
+
+---
+
 ## Arquitetura (Estado Unico e Contratos Rigidos)
 
 O sistema segue uma **Arquitetura Orientada a Estado Unico** com tres garantias:

@@ -1,0 +1,2 @@
+# Diretório do volume persistente do ml_model.joblib.
+# Copie seu modelo aqui antes do primeiro boot: cp ml_model.joblib docker_models/

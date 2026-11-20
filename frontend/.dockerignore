@@ -1,0 +1,6 @@
+# O build multi-stage roda npm ci dentro da imagem: nunca copie dependências
+# ou artefatos gerados no host (podem ter binários de outra plataforma).
+node_modules/
+dist/
+npm-debug.log*
+.DS_Store
