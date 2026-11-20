@@ -194,6 +194,24 @@ class TestCalibracaoTrendFollowing:
         assert tendencia["action"] == "COMPRA"
 
 
+class TestCalibracaoContraCustos:
+    """Grid com 5.000 ticks reais e custos ativos fixou estes valores."""
+
+    def test_banda_de_reversao_calibrada(self):
+        assert config.MEAN_REVERSION_BAND_WIDTH == 0.0025
+        assert MeanReversionEngine().band_width == 0.0025
+
+    def test_range_minimo_de_breakout_calibrado(self):
+        assert config.BREAKOUT_THRESHOLD == 0.0010
+        assert config.BREAKOUT_MIN_RANGE == 0.0020
+        assert BreakoutMomentumEngine().min_range == 0.0020
+
+    def test_threshold_ml_mantido_para_nao_estrangular_volume(self):
+        # 0,65 / 0,68 / 0,70 reduziram o lucro líquido no grid (menos trades,
+        # sem ganho de assertividade).
+        assert config.ML_APPROVAL_THRESHOLD == 0.58
+
+
 class TestConfirmacaoConsolidacao:
     def test_consolidacao_conta_confirmacao_e_aceita_dois_lados(self, monkeypatch):
         monkeypatch.setattr(config, "TREND_CONFIRMATION_TICKS", 2)

@@ -610,17 +610,18 @@ PARAMETER_GUIDANCE: Dict[str, Dict[str, str]] = {
     },
     "MEAN_REVERSION_BAND_WIDTH": {
         "impact_up": (
-            "Banda mais larga: mais preços entram na zona de reversão. "
-            "Mais sinais, com maior risco de operar contra a tendência."
+            "Banda mais larga: exige desvio maior da média. Menos sinais, "
+            "porém cada entrada captura um movimento capaz de pagar taxas e slippage."
         ),
         "impact_down": (
-            "Banda estreita: só desvios grandes geram reversão. Menos "
-            "trades, porém mais precisos."
+            "Banda estreita: mais sinais, mas o movimento médio pode ficar "
+            "abaixo do custo ida-e-volta (~0,25%) e gerar prejuízo mesmo acertando a direção."
         ),
-        "recommended": "0,0008 a 0,0015 (0,08% a 0,15%)",
+        "recommended": "0,0020 a 0,0030 (0,20% a 0,30%)",
         "tip": (
-            "A calibração atual usa 0,0010. Ajuste junto de "
-            "MEAN_REVERSION_CONFIDENCE e do stop."
+            "Calibrado em 0,0025 (atual) com 5.000 ticks reais e custos ativos: "
+            "0,10% capturava ~0,11% de movimento contra ~0,25% de custo. "
+            "Ajuste junto de MEAN_REVERSION_CONFIDENCE e do stop."
         ),
     },
     "MEAN_REVERSION_CONFIDENCE": {
@@ -642,10 +643,20 @@ PARAMETER_GUIDANCE: Dict[str, Dict[str, str]] = {
         "tip": "A calibração atual usa 0,0010 com BREAKOUT_CONFIDENCE 0,68.",
     },
     "BREAKOUT_MIN_RANGE": {
-        "impact_up": "Só ranges amplos podem romper: menos sinais, mais relevantes.",
-        "impact_down": "Ranges estreitos também rompem: mais sinais e mais ruído.",
-        "recommended": "0,001 a 0,003 (0,1% a 0,3%)",
-        "tip": "Trabalha em conjunto com BREAKOUT_THRESHOLD.",
+        "impact_up": (
+            "Só ranges amplos podem romper: menos sinais, mais relevantes. "
+            "Em stablecoins elimina rompimentos que nunca pagam os custos."
+        ),
+        "impact_down": (
+            "Ranges estreitos também rompem: mais sinais e mais ruído. "
+            "Em USD/BRL gerou 11 trades com 0% de acerto e prejuízo líquido."
+        ),
+        "recommended": "0,0020 a 0,0030 (0,20% a 0,30%)",
+        "tip": (
+            "Calibrado em 0,0020 (atual): abaixo disso o USD operava 11 vezes "
+            "com prejuízo; acima, SOL e BTC perdem volume. "
+            "Trabalha em conjunto com BREAKOUT_THRESHOLD."
+        ),
     },
     "BREAKOUT_CONFIDENCE": {
         "impact_up": "Rompimentos recebem mais confiança e tamanho maior.",

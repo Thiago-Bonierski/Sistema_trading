@@ -190,18 +190,29 @@ VOLATILE_SLIPPAGE_MULTIPLIER = 2.0
 TREND_PRICE_THRESHOLD = 0.004
 TREND_CONFIDENCE = 0.82
 
-# Mean Reversion — Valores base para fiduciárias.
-# 0,10%: em 1m o desvio típico da janela anterior é ~0,085% (mediana) e
-# p90 ~0,20%; 0,3% gerava apenas 3 sinais em 236 ticks de CONSOLIDACAO.
-MEAN_REVERSION_BAND_WIDTH = 0.0010
+# Mean Reversion — calibrado contra custos de execução.
+# A banda de 0,10% capturava um movimento médio de ~0,11%, abaixo do custo
+# ida-e-volta de ~0,25% (0,20% de taxa + 0,04%~0,08% de slippage): 53 trades
+# no BTC fechavam com prejuízo líquido mesmo acertando a direção. Grid com
+# 5.000 ticks reais e custos ativos: 0,20% -> +R$71, 0,25% -> +R$85,
+# 0,30% -> +R$88 no BTC/PAPER. 0,25% é o ponto com melhor equilíbrio entre
+# lucro líquido e volume (9 trades no BTC, 17 na SOL).
+MEAN_REVERSION_BAND_WIDTH = 0.0025
 MEAN_REVERSION_CONFIDENCE = 0.74
 
 # Breakout Momentum — Valores base para fiduciárias
-BREAKOUT_THRESHOLD = 0.0010         # 0.10% acima máximo/abaixo mínimo (era 0,0015)
-BREAKOUT_MIN_RANGE = 0.0015         # Range mínimo necessário (era 0,003)
+# Mantido em 0,10%: subir para 0,15%/0,20% no grid cortou o lucro líquido
+# do BTC de +R$88 para +R$74/+R$26 sem ganhar precisão.
+BREAKOUT_THRESHOLD = 0.0010         # 0.10% acima máximo/abaixo mínimo
+# 0,15% deixava 11 trades de USD (stablecoin) com 0% de acerto e ~R$71 de
+# prejuízo líquido. Com 0,20% nenhum rompimento de USD qualifica — o filtro
+# evita operar onde a amplitude nunca paga os custos. SOL e BTC seguem ativos.
+BREAKOUT_MIN_RANGE = 0.0020
 BREAKOUT_CONFIDENCE = 0.68
 
 # ML Classifier
+# Grid: 0,65/0,68/0,70 reduziram o lucro líquido (menos trades, sem ganho
+# de assertividade). Mantido em 0,58 para não estrangular o volume.
 ML_APPROVAL_THRESHOLD = 0.58       # Threshold para aprovar trades
 
 # Guardrails do filtro ML. O filtro só é aplicado quando o artefato em disco
