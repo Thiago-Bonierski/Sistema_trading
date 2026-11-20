@@ -39,6 +39,15 @@ from monitor import (
     persist_state,
     salvar_trade_history,
     state_lock,
+    get_execution_adapter,
+    set_execution_adapter,
+    dispatch_execution_order,
+    last_executions,
+)
+from execution import (
+    ExecutionSecurityError,
+    create_execution_adapter,
+    validate_mode_switch,
 )
 from ml_training import MLTrainer
 from trade_origin import SIMULATED_PREFIX, SYNTHETIC_PREFIX
@@ -858,6 +867,99 @@ def api_status():
     })
 
 
+# ----------------------------------------------------------------------------
+# EXECUÇÃO (Binance Spot via ccxt)
+# ----------------------------------------------------------------------------
+
+@app.route("/api/execution/status", methods=["GET"])
+def api_execution_status():
+    """Modo ativo, conexão, saldos e pares disponíveis na exchange."""
+    with state_lock:
+        adapter = get_execution_adapter()
+        mode = getattr(adapter, "mode", config.EXECUTION_MODE)
+        open_positions = len(position_manager.positions)
+
+    refresh = str(request.args.get("refresh", "")).strip().lower() in (
+        "1", "true", "yes",
+    )
+    try:
+        status = adapter.status()
+        if refresh:
+            fresh = adapter.get_balances()
+            status["balances"] = fresh.get("balances", status.get("balances", {}))
+            status["connected"] = bool(fresh.get("ok"))
+            if not fresh.get("ok"):
+                status["last_error"] = fresh.get("error")
+    except Exception as exc:  # a API nunca quebra por falha da exchange
+        logger.exception("Falha ao consultar status de execução")
+        status = {
+            "mode": mode,
+            "connected": False,
+            "last_error": str(exc),
+            "balances": {},
+        }
+
+    return jsonify({
+        "ok": True,
+        "mode": mode,
+        "available_modes": ["PAPER", "TESTNET"],
+        "allow_live": bool(config.ALLOW_LIVE_TRADING),
+        "open_positions": open_positions,
+        "connection": status,
+        "recent_executions": list(last_executions[-10:]),
+    })
+
+
+@app.route("/api/execution/mode", methods=["POST"])
+def api_execution_mode():
+    """Alterna PAPER <-> TESTNET em runtime, com trava por posição aberta."""
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get("mode")
+
+    with state_lock:
+        current = getattr(get_execution_adapter(), "mode", config.EXECUTION_MODE)
+        open_positions = len(position_manager.positions)
+
+    allowed, reason = validate_mode_switch(current, requested, open_positions)
+    if not allowed:
+        return jsonify({"ok": False, "error": reason, "mode": current}), 409
+
+    try:
+        adapter = create_execution_adapter(requested)
+    except ExecutionSecurityError as exc:
+        return jsonify({"ok": False, "error": str(exc), "mode": current}), 403
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"ok": False, "error": str(exc), "mode": current}), 400
+
+    set_execution_adapter(adapter)
+    config.EXECUTION_MODE = str(requested).strip().upper()
+    logger.warning("🔁 Modo de execução alterado: %s -> %s", current, config.EXECUTION_MODE)
+
+    return jsonify({
+        "ok": True,
+        "mode": config.EXECUTION_MODE,
+        "connection": adapter.status(),
+    })
+
+
+@app.route("/api/execution/test-connection", methods=["POST"])
+def api_execution_test_connection():
+    """Valida credenciais e mede latência sem abrir nenhuma posição."""
+    try:
+        result = get_execution_adapter().test_connection()
+    except Exception as exc:
+        logger.exception("Falha no teste de conexão com a exchange")
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "mode": getattr(get_execution_adapter(), "mode", "PAPER"),
+        }), 502
+
+    if not result.get("ok"):
+        return jsonify(result), 502
+    return jsonify(result)
+
+
 @app.route("/api/monitor/toggle", methods=["POST"])
 def api_monitor_toggle():
     """
@@ -1038,6 +1140,14 @@ def api_close_all_positions():
                 if not trade:
                     continue
 
+                close_side = "VENDA" if trade.get("side") == "COMPRA" else "COMPRA"
+                trade["execution"] = dispatch_execution_order(
+                    side=close_side,
+                    symbol=symbol,
+                    amount_brl=trade.get("position_size", 0.0),
+                    price=price,
+                    reason="PANIC_CLOSE",
+                )
                 equity_manager.update_equity(trade["pnl"])
                 risk_controller.close_position(symbol)
                 kpi_tracker.record_trade_result(trade)

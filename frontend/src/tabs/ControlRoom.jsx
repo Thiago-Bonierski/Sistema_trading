@@ -10,10 +10,12 @@ import {
   Pause,
   Play,
   RefreshCw,
+  Server,
   ShieldAlert,
   ShieldCheck,
   Siren,
   TrendingUp,
+  Zap,
   Wallet,
 } from 'lucide-react'
 import { api } from '../api.js'
@@ -287,6 +289,94 @@ function HealthPanel({ data }) {
   )
 }
 
+function ExecutionCard({ status, busy, notice, onChangeMode, onTest }) {
+  const mode = String(status?.mode || 'PAPER')
+  const testnet = mode === 'TESTNET'
+  const connection = status?.connection || {}
+  const balances = connection.balances || {}
+  const connected = Boolean(connection.connected)
+  const pairs = connection.available_pairs || []
+  const blocked = Boolean(status?.open_positions)
+
+  return (
+    <Card className="p-4 sm:p-5">
+      <SectionTitle
+        icon={Server}
+        title="Modo de Execução"
+        subtitle="PAPER simula localmente; TESTNET envia ordens reais para a Binance Spot Testnet."
+        right={
+          <Badge variant={testnet ? 'amber' : 'emerald'}>
+            {testnet ? 'Binance Testnet' : 'Paper Local'}
+          </Badge>
+        }
+      />
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <Button
+          variant={testnet ? 'ghost' : 'primary'}
+          loading={busy === 'PAPER'}
+          disabled={blocked || !testnet}
+          onClick={() => onChangeMode('PAPER')}
+          title={blocked ? 'Feche as posições antes de trocar o modo' : undefined}
+        >
+          PAPER LOCAL
+        </Button>
+        <Button
+          variant={testnet ? 'primary' : 'ghost'}
+          loading={busy === 'TESTNET'}
+          disabled={blocked || testnet}
+          onClick={() => onChangeMode('TESTNET')}
+          title={blocked ? 'Feche as posições antes de trocar o modo' : undefined}
+        >
+          BINANCE TESTNET
+        </Button>
+        <Button variant="ghost" onClick={onTest} loading={busy === 'test'}>
+          <Zap size={15} /> Testar Conexão Testnet
+        </Button>
+        <span className="ml-auto flex items-center gap-2 text-[11px] text-slate-500">
+          <StatusDot active={connected} />
+          {connected ? 'Conectado' : testnet ? 'Sem conexão' : 'Simulação local'}
+          {connection.latency_ms != null ? ` · ${connection.latency_ms} ms` : ''}
+        </span>
+      </div>
+
+      {blocked ? (
+        <p className="mt-3 text-[11px] text-amber-300">
+          {status.open_positions} posição(ão) aberta(s): encerre para trocar o modo.
+        </p>
+      ) : null}
+      {connection.last_error ? (
+        <p className="mt-3 break-words text-[11px] text-rose-300">
+          {connection.last_error}
+        </p>
+      ) : null}
+      {notice ? <div className="mt-3"><Alert type={notice.type}>{notice.message}</Alert></div> : null}
+
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {['BRL', 'USDT', 'BTC', 'SOL'].map((currency) => (
+          <div
+            key={currency}
+            className="rounded-xl border border-white/[0.07] bg-slate-950/40 p-3"
+          >
+            <p className="text-[10px] uppercase tracking-wide text-slate-500">{currency}</p>
+            <p className="mt-1 text-sm font-semibold tabular-nums text-slate-100">
+              {balances[currency] != null
+                ? formatNumber(balances[currency], currency === 'BRL' || currency === 'USDT' ? 2 : 6)
+                : '—'}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <p className="mt-3 text-[11px] text-slate-600">
+        {testnet
+          ? `Pares disponíveis: ${pairs.length ? pairs.join(', ') : 'carregue com Testar Conexão'}`
+          : 'Nenhuma ordem real é enviada enquanto o modo PAPER estiver ativo.'}
+      </p>
+    </Card>
+  )
+}
+
 export default function ControlRoom() {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
@@ -294,6 +384,18 @@ export default function ControlRoom() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [lastUpdated, setLastUpdated] = useState(null)
+  const [execution, setExecution] = useState(null)
+  const [executionBusy, setExecutionBusy] = useState('')
+  const [executionNotice, setExecutionNotice] = useState(null)
+
+  const refreshExecution = useCallback(async () => {
+    try {
+      setExecution(await api.executionStatus())
+    } catch (exc) {
+      // O card mostra o último estado conhecido se a API de execução falhar.
+      setExecutionNotice({ type: 'error', message: exc.message })
+    }
+  }, [])
 
   const refresh = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading((current) => current && true)
@@ -302,12 +404,13 @@ export default function ControlRoom() {
       setData(payload)
       setLastUpdated(new Date())
       setError('')
+      await refreshExecution()
     } catch (exc) {
       setError(exc.message || 'Falha ao carregar o estado ao vivo')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [refreshExecution])
 
   useEffect(() => {
     let mounted = true
@@ -319,6 +422,9 @@ export default function ControlRoom() {
         setData(payload)
         setLastUpdated(new Date())
         setError('')
+        api.executionStatus()
+          .then((result) => { if (mounted) setExecution(result) })
+          .catch(() => {})
       } catch (exc) {
         if (mounted) setError(exc.message || 'Falha ao carregar o estado ao vivo')
       } finally {
@@ -392,6 +498,41 @@ export default function ControlRoom() {
       setNotice({ type: 'error', message: exc.message })
     } finally {
       setBusy('')
+    }
+  }
+
+  async function handleExecutionMode(mode) {
+    setExecutionBusy(mode)
+    setExecutionNotice(null)
+    try {
+      const result = await api.setExecutionMode(mode)
+      setExecutionNotice({
+        type: 'success',
+        message: `Modo de execução alterado para ${result.mode}.`,
+      })
+    } catch (exc) {
+      setExecutionNotice({ type: 'error', message: exc.message })
+    } finally {
+      setExecutionBusy('')
+      await refreshExecution()
+    }
+  }
+
+  async function handleTestConnection() {
+    setExecutionBusy('test')
+    setExecutionNotice(null)
+    try {
+      const result = await api.testExecutionConnection()
+      setExecutionNotice({
+        type: 'success',
+        message: `Conexão OK${result.latency_ms != null ? ` (${result.latency_ms} ms)` : ''}. Saldos atualizados.`,
+      })
+      await refreshExecution()
+    } catch (exc) {
+      setExecutionNotice({ type: 'error', message: exc.message })
+      await refreshExecution()
+    } finally {
+      setExecutionBusy('')
     }
   }
 
@@ -539,6 +680,14 @@ export default function ControlRoom() {
           hint={`${risk.global_trades ?? 0}/${risk.global_limit ?? '—'} trades no limite`}
         />
       </Card>
+
+      <ExecutionCard
+        status={execution}
+        busy={executionBusy}
+        notice={executionNotice}
+        onChangeMode={handleExecutionMode}
+        onTest={handleTestConnection}
+      />
 
       <div>
         <SectionTitle

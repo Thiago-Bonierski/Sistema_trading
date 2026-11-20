@@ -54,6 +54,11 @@ export const api = {
   toggleMonitor: (action) => post('/api/monitor/toggle', { action }),
   panicClose: () => post('/api/positions/close-all', {}),
 
+  executionStatus: (refresh = false) =>
+    get(`/api/execution/status${refresh ? '?refresh=true' : ''}`),
+  setExecutionMode: (mode) => post('/api/execution/mode', { mode }),
+  testExecutionConnection: () => post('/api/execution/test-connection', {}),
+
   simulate: (payload) => post('/api/simulate', payload),
   simulations: (limit = 20) => get(`/api/simulations${query({ limit })}`),
   simulation: (filename) =>

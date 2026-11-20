@@ -290,6 +290,26 @@ LOG_MAX_BYTES = 10 * 1024 * 1024   # 10MB
 LOG_BACKUP_COUNT = 5                # Manter 5 backups
 
 # ============================================================================
+# EXECUÇÃO (Binance Spot via ccxt)
+# ============================================================================
+
+# Modo efetivo do adaptador de execução: PAPER (padrão), TESTNET ou LIVE.
+# Nenhuma ordem real sai do computador enquanto estiver em PAPER.
+EXECUTION_MODE = os.getenv("EXECUTION_MODE", "PAPER").strip().upper()
+
+# Credenciais. As de TESTNET são usadas apenas com set_sandbox_mode(True).
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+BINANCE_TESTNET_API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
+BINANCE_TESTNET_API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+
+# Trava dupla: o modo LIVE é recusado a menos que isto seja explicitamente
+# True no .env. Impede que uma variável isolada ligue negociação real.
+ALLOW_LIVE_TRADING = os.getenv("ALLOW_LIVE_TRADING", "False").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+
+# ============================================================================
 # TOLERANCE FOR FLOAT COMPARISONS
 # ============================================================================
 

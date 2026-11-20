@@ -14,7 +14,7 @@ import json
 import time
 import threading
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 import logging
 
 import pandas as pd
@@ -44,6 +44,7 @@ from exhaustion_filter import check_exhaustion
 from kpis import KPITracker
 from core.contracts import DecisionContext, MarketEvent, OrderIntent
 from core.pipeline import DecisionPipeline, TrendConfirmationTracker
+from execution import ExecutionAdapter, PaperExecutionAdapter, create_execution_adapter
 
 # Configurar logging
 logger = setup_logging("monitor", config.LOG_LEVEL)
@@ -112,6 +113,97 @@ decision_pipeline = DecisionPipeline(
     ),
     trend_tracker=trend_tracker,
 )
+
+
+# ============================================================================
+# ADAPTADOR DE EXECUÇÃO (efeito colateral do decision pipeline)
+# ============================================================================
+
+# PAPER é o padrão: nenhuma ordem sai do processo até o operador trocar para
+# TESTNET explicitamente pelo painel. O pipeline continua sem IO de exchange.
+execution_adapter: ExecutionAdapter = create_execution_adapter()
+last_executions: List[Dict[str, Any]] = []
+
+
+def _attach_local_equity(adapter: ExecutionAdapter) -> ExecutionAdapter:
+    """No PAPER, o saldo BRL exibido no painel vem do EquityManager local."""
+    if isinstance(adapter, PaperExecutionAdapter) and adapter.equity_manager is None:
+        adapter.equity_manager = equity_manager
+    return adapter
+
+
+_attach_local_equity(execution_adapter)
+
+
+def get_execution_adapter() -> ExecutionAdapter:
+    """Adaptador ativo (usado também pela API Flask)."""
+    return execution_adapter
+
+
+def set_execution_adapter(adapter: ExecutionAdapter) -> ExecutionAdapter:
+    """Troca o adaptador ativo em runtime, protegido pelo lock de estado."""
+    global execution_adapter
+    with state_lock:
+        execution_adapter = _attach_local_equity(adapter)
+    logger.info(
+        "🔁 Adaptador de execução alterado para %s", getattr(adapter, "mode", "?")
+    )
+    return execution_adapter
+
+
+def dispatch_execution_order(
+    side: str,
+    symbol: str,
+    amount_brl: float,
+    price: float,
+    reason: str = "",
+) -> Optional[Dict[str, Any]]:
+    """
+    Envia a ordem correspondente a uma decisão já tomada.
+
+    Falhas da exchange são logadas e devolvidas, nunca propagadas: o motor
+    precisa continuar gerenciando posições mesmo se a Binance estiver fora.
+    """
+    amount = float(amount_brl or 0.0)
+    price_value = float(price or 0.0)
+    if amount <= 0 or price_value <= 0:
+        logger.debug(
+            "Execução ignorada (%s/%s): amount=%.2f price=%.2f",
+            side, symbol, amount, price_value,
+        )
+        return None
+
+    try:
+        result = execution_adapter.execute_order(side, symbol, amount, price_value)
+    except Exception as exc:  #pragma: no cover - defesa contra adapter externo
+        logger.exception("Falha inesperada ao executar ordem em %s", symbol)
+        result = {
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+
+    result = {
+        **result,
+        "symbol": str(symbol).strip().upper(),
+        "reason": reason,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    last_executions.append(result)
+    del last_executions[:-50]
+
+    if result.get("ok"):
+        logger.info(
+            "🚀 Execução %s %s (%s): %s",
+            result.get("side"), result["symbol"], reason,
+            "paper" if result.get("paper") else result.get("order_id"),
+        )
+    else:
+        logger.error(
+            "❌ Execução %s %s falhou (%s): %s",
+            side, result["symbol"], result.get("error_type"), result.get("error"),
+        )
+    return result
 
 
 # ============================================================================
@@ -254,6 +346,16 @@ def close_position_due_to_data_gap(
 
     if not trade_result:
         return
+
+    # Execução real/simulada da saída (fechamento de COMPRA => VENDA).
+    close_side = "VENDA" if trade_result.get("side") == "COMPRA" else "COMPRA"
+    trade_result["execution"] = dispatch_execution_order(
+        side=close_side,
+        symbol=symbol,
+        amount_brl=trade_result.get("position_size", 0.0),
+        price=preco,
+        reason=trade_result.get("reason") or "data_gap",
+    )
 
     # Atualizar equity
     pnl_amount = trade_result["pnl"]
@@ -716,6 +818,14 @@ def process_symbol(symbol: str, tick_count: int) -> None:
         # Fechamento: equity e risco já atualizados pelo pipeline
         trade_result = decision.trade_result
         if trade_result:
+            close_side = "VENDA" if trade_result.get("side") == "COMPRA" else "COMPRA"
+            trade_result["execution"] = dispatch_execution_order(
+                side=close_side,
+                symbol=symbol,
+                amount_brl=trade_result.get("position_size", 0.0),
+                price=preco,
+                reason=trade_result.get("reason") or "exit",
+            )
             kpi_tracker.record_trade_result(trade_result)
             salvar_trade_history(trade_result)
             log_trade_execution(logger, trade_result)
@@ -723,6 +833,15 @@ def process_symbol(symbol: str, tick_count: int) -> None:
 
     elif decision.intent == OrderIntent.OPEN:
         # Nova posição: risco já registrado pelo pipeline
+        position = position_manager.get_position(symbol)
+        if position:
+            dispatch_execution_order(
+                side=position.side,
+                symbol=symbol,
+                amount_brl=position.position_size,
+                price=preco,
+                reason="entry",
+            )
         persist_state()
 
     elif decision.intent == OrderIntent.HOLD and decision.position_side:
