@@ -286,6 +286,8 @@ export default function MlConsole() {
   const [trainNotice, setTrainNotice] = useState(null)
   const [toggling, setToggling] = useState(false)
   const [toggleNotice, setToggleNotice] = useState(null)
+  const [backingUp, setBackingUp] = useState(false)
+  const [backupNotice, setBackupNotice] = useState(null)
 
   const [logs, setLogs] = useState([])
   const [logFiles, setLogFiles] = useState([])
@@ -399,6 +401,22 @@ export default function MlConsole() {
     }
   }
 
+  async function handleBackup() {
+    setBackingUp(true)
+    setBackupNotice(null)
+    try {
+      const payload = await api.backup()
+      setBackupNotice({
+        type: 'success',
+        message: `Backup criado em backups/${payload.directory} (${payload.copied.length} arquivo(s)).`,
+      })
+    } catch (exc) {
+      setBackupNotice({ type: 'error', message: exc.message })
+    } finally {
+      setBackingUp(false)
+    }
+  }
+
   const stats = useMemo(() => {
     const counts = { INFO: 0, WARNING: 0, ERROR: 0 }
     logs.forEach((entry) => {
@@ -429,6 +447,21 @@ export default function MlConsole() {
             onTrain={handleTrain}
             notice={trainNotice}
           />
+          <Card className="p-4 sm:p-5">
+            <SectionTitle
+              icon={Database}
+              title="Backup rápido"
+              subtitle="Copia histórico, modelo treinado e configuração para backups/."
+            />
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button variant="primary" onClick={handleBackup} loading={backingUp}>
+                <Database size={14} /> Fazer backup agora
+              </Button>
+              {backupNotice ? (
+                <Alert type={backupNotice.type}>{backupNotice.message}</Alert>
+              ) : null}
+            </div>
+          </Card>
         </div>
 
         <Card className="flex min-h-[620px] flex-col p-4 sm:p-5">

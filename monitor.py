@@ -44,7 +44,14 @@ from exhaustion_filter import check_exhaustion
 from kpis import KPITracker
 from core.contracts import DecisionContext, MarketEvent, OrderIntent
 from core.pipeline import DecisionPipeline, TrendConfirmationTracker
-from execution import ExecutionAdapter, PaperExecutionAdapter, create_execution_adapter
+from execution import (
+    BinanceCcxtAdapter,
+    ExecutionAdapter,
+    FallbackPaperAdapter,
+    PaperExecutionAdapter,
+    create_execution_adapter,
+    is_network_failure,
+)
 
 # Configurar logging
 logger = setup_logging("monitor", config.LOG_LEVEL)
@@ -151,6 +158,35 @@ def set_execution_adapter(adapter: ExecutionAdapter) -> ExecutionAdapter:
     return execution_adapter
 
 
+def degrade_execution_to_paper(result: Any, operation: str = "operação da exchange") -> bool:
+    """
+    Degrada TESTNET -> PAPER quando a Binance falha por rede em runtime.
+
+    Erros de negócio (saldo insuficiente, lote mínimo, par inválido) não
+    mudam o modo: apenas falhas de transporte/timeout disparam o fallback.
+    Nunca lança exceção — o motor continua gerenciando posições.
+    """
+    global execution_adapter
+    if not is_network_failure(result):
+        return False
+
+    with state_lock:
+        current = execution_adapter
+        if not isinstance(current, BinanceCcxtAdapter):
+            return False
+        detail = str(result.get("error") or "") if isinstance(result, dict) else str(result)
+        reason = f"Falha de rede na {operation}: {detail}".strip().rstrip(":")
+        execution_adapter = _attach_local_equity(
+            FallbackPaperAdapter(reason=reason, requested_mode=current.mode)
+        )
+
+    logger.error(
+        "⚠️ TESTNET indisponível (%s). Operando em fallback PAPER. Motivo: %s",
+        operation, reason,
+    )
+    return True
+
+
 def dispatch_execution_order(
     side: str,
     symbol: str,
@@ -182,6 +218,10 @@ def dispatch_execution_order(
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
+
+    # TESTNET fora do ar: sem ordens reais daqui em diante, sem travar o motor.
+    if degrade_execution_to_paper(result, "execução de ordem"):
+        result = {**result, "fallback": True, "fallback_mode": "PAPER"}
 
     result = {
         **result,

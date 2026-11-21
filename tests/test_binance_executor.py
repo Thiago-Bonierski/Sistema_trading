@@ -107,6 +107,7 @@ def test_testnet_obriga_sandbox_e_usa_chaves_da_testnet(monkeypatch):
     assert created["params"]["apiKey"] == "test-key"
     assert created["params"]["secret"] == "test-secret"
     assert created["params"]["options"]["defaultType"] == "spot"
+    assert created["params"]["options"]["adjustForTimeDifference"] is True
 
 
 def test_paper_nao_cria_exchange(monkeypatch):

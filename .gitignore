@@ -12,6 +12,9 @@ __pycache__/
 *.json
 log.txt
 
+# Backups rapidos (backup.bat / aba ML & Console)
+backups/
+
 # Cache de dados de mercado (gerado localmente, nao versionado)
 data_cache/
 

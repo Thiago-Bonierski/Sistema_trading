@@ -68,6 +68,8 @@ export const api = {
   saveConfig: (values) => post('/api/config', { values }),
   resetConfig: () => post('/api/config/reset', {}),
 
+  backup: () => post('/api/backup', {}),
+
   mlStatus: () => get('/api/ml/status'),
   trainMl: () => post('/api/ml/train', {}),
   toggleMl: (enabled) =>

@@ -45,6 +45,20 @@ except ImportError:  # pragma: no cover - mantém importável sem a dependência
 
 VALID_EXECUTION_MODES = ("PAPER", "TESTNET", "LIVE")
 
+# Falhas de transporte/rede do ccxt. Erros de saldo, preço ou par NÃO degradam
+# o modo: apenas estes indicam que a exchange está indisponível.
+NETWORK_ERROR_TYPES = frozenset({
+    "NetworkError", "NetworkErrorInvalidJson", "ExchangeNotAvailable",
+    "RequestTimeout", "ConnectTimeout", "ReadTimeout", "ConnectionError",
+    "DDoSProtection", "ProxyError", "InvalidProxyURL", "Timeout",
+    "TimeoutError", "OSError",
+})
+
+_NETWORK_HINTS = (
+    "timeout", "timed out", "connection", "network", "unreachable",
+    "temporarily unavailable", "name or service", "ssl",
+)
+
 # Par preferido em BRL e alternativa em USDT na Spot Testnet.
 # USD é o ativo interno USDT/BRL: não existe fallback USDT/USDT, então o
 # adaptador reporta "par indisponível" se o BRL não existir na conta.
@@ -134,6 +148,29 @@ def _timed(call, *args, **kwargs):
     result = call(*args, **kwargs)
     latency = round((time.perf_counter() - started) * 1000, 2)
     return result, latency
+
+
+def is_network_failure(value: Any) -> bool:
+    """
+    Detecta falha de rede em um resultado de adaptador ou em uma exceção.
+
+    Usado para degradar TESTNET -> PAPER sem confundir erros de negócio
+    (saldo insuficiente, par inválido, preço zerado) com queda da exchange.
+    """
+    if isinstance(value, dict):
+        error_type = str(value.get("error_type") or "")
+        if error_type in NETWORK_ERROR_TYPES:
+            return True
+        if value.get("ok") is not False:
+            return False
+        message = str(value.get("error") or "").lower()
+    else:
+        error_type = type(value).__name__ if value is not None else ""
+        if error_type in NETWORK_ERROR_TYPES:
+            return True
+        message = str(value or "").lower()
+
+    return any(hint in message for hint in _NETWORK_HINTS)
 
 
 class ExecutionAdapter(ABC):
@@ -243,7 +280,45 @@ class PaperExecutionAdapter(ExecutionAdapter):
             "last_error": None,
             "balances": self.get_balances()["balances"],
             "available_pairs": [],
+            # Estado da Testnet para o painel (Sala de Controle).
+            "testnet_state": "disabled",
+            "requested_mode": None,
+            "fallback": False,
         }
+
+
+class FallbackPaperAdapter(PaperExecutionAdapter):
+    """
+    PAPER automático quando a TESTNET falha na verificação inicial ou em rede.
+
+    Mantém integralmente o contrato do PaperExecutionAdapter (modo PAPER,
+    nenhuma ordem real) e acrescenta metadados para que a API e o painel
+    expliquem por que a TESTNET não está ativa.
+    """
+
+    mode = "PAPER"
+
+    def __init__(
+        self,
+        reason: str,
+        requested_mode: str = "TESTNET",
+        equity_manager=None,
+    ):
+        super().__init__(equity_manager=equity_manager)
+        self.requested_mode = str(requested_mode or "TESTNET").strip().upper()
+        self.fallback_reason = str(reason or "Falha de rede na Binance Testnet")
+        self.fallback_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+    def status(self) -> Dict[str, Any]:
+        status = super().status()
+        status.update({
+            "testnet_state": "unavailable",
+            "requested_mode": self.requested_mode,
+            "fallback": True,
+            "fallback_reason": self.fallback_reason,
+            "fallback_at": self.fallback_at,
+        })
+        return status
 
 
 class BinanceCcxtAdapter(ExecutionAdapter):
@@ -287,7 +362,12 @@ class BinanceCcxtAdapter(ExecutionAdapter):
                 "secret": secret,
                 "enableRateLimit": True,
                 "timeout": 15000,
-                "options": {"defaultType": "spot"},
+                "options": {
+                    "defaultType": "spot",
+                    # Evita queda injustificada da Testnet quando o relógio do
+                    # Windows está alguns ms à frente do servidor (erro -1021).
+                    "adjustForTimeDifference": True,
+                },
             }
         )
         if self.mode == "TESTNET":
@@ -523,6 +603,9 @@ class BinanceCcxtAdapter(ExecutionAdapter):
             "exchange": "binance",
             "sandbox": self.mode == "TESTNET",
             "connected": bool(self._balances),
+            "testnet_state": "online" if self.mode == "TESTNET" else "disabled",
+            "requested_mode": self.mode,
+            "fallback": False,
             "latency_ms": self._latency_ms,
             "last_error": self._last_error,
             "balances": dict(self._balances),

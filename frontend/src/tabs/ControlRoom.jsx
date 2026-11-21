@@ -297,6 +297,11 @@ function ExecutionCard({ status, busy, notice, onChangeMode, onTest }) {
   const connected = Boolean(connection.connected)
   const pairs = connection.available_pairs || []
   const blocked = Boolean(status?.open_positions)
+  const testnetInfo = status?.testnet || { state: 'disabled', label: 'Desativada' }
+  const testnetVariant =
+    testnetInfo.state === 'online' ? 'emerald'
+      : testnetInfo.state === 'unavailable' ? 'rose'
+        : 'slate'
 
   return (
     <Card className="p-4 sm:p-5">
@@ -310,6 +315,19 @@ function ExecutionCard({ status, busy, notice, onChangeMode, onTest }) {
           </Badge>
         }
       />
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.07] bg-slate-950/40 px-3 py-2">
+        <StatusDot active={Boolean(testnetInfo.online)} />
+        <span className="text-[11px] uppercase tracking-wide text-slate-500">
+          Testnet
+        </span>
+        <Badge variant={testnetVariant}>{testnetInfo.label}</Badge>
+        {testnetInfo.fallback ? (
+          <span className="text-[11px] text-rose-300/80">
+            Nenhuma ordem real está sendo enviada.
+          </span>
+        ) : null}
+      </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <Button
@@ -344,6 +362,13 @@ function ExecutionCard({ status, busy, notice, onChangeMode, onTest }) {
         <p className="mt-3 text-[11px] text-amber-300">
           {status.open_positions} posição(ão) aberta(s): encerre para trocar o modo.
         </p>
+      ) : null}
+      {testnetInfo.fallback ? (
+        <div className="mt-3">
+          <Alert type="warning">
+            {`Binance Testnet indisponível: ${testnetInfo.reason || 'falha de rede'}. O motor segue em PAPER local.`}
+          </Alert>
+        </div>
       ) : null}
       {connection.last_error ? (
         <p className="mt-3 break-words text-[11px] text-rose-300">

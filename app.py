@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -42,11 +43,13 @@ from monitor import (
     get_execution_adapter,
     set_execution_adapter,
     dispatch_execution_order,
+    degrade_execution_to_paper,
     last_executions,
 )
 from execution import (
     ExecutionSecurityError,
     create_execution_adapter,
+    testnet_status_payload,
     validate_mode_switch,
 )
 from ml_training import MLTrainer
@@ -54,6 +57,9 @@ from trade_origin import SIMULATED_PREFIX, SYNTHETIC_PREFIX
 
 # Configurar logging
 logger = setup_logging("flask_app", config.LOG_LEVEL)
+
+# Raiz do projeto (independente do diretório de execução do processo).
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 # Criar app Flask
 app = Flask(__name__)
@@ -886,10 +892,16 @@ def api_execution_status():
         status = adapter.status()
         if refresh:
             fresh = adapter.get_balances()
-            status["balances"] = fresh.get("balances", status.get("balances", {}))
-            status["connected"] = bool(fresh.get("ok"))
-            if not fresh.get("ok"):
-                status["last_error"] = fresh.get("error")
+            if degrade_execution_to_paper(fresh, "consulta de saldos"):
+                adapter = get_execution_adapter()
+                status = adapter.status()
+                mode = getattr(adapter, "mode", mode)
+            else:
+                status["balances"] = fresh.get("balances", status.get("balances", {}))
+                status["connected"] = bool(fresh.get("ok"))
+                if not fresh.get("ok"):
+                    status["last_error"] = fresh.get("error")
+        testnet = testnet_status_payload(adapter, status)
     except Exception as exc:  # a API nunca quebra por falha da exchange
         logger.exception("Falha ao consultar status de execução")
         status = {
@@ -898,10 +910,13 @@ def api_execution_status():
             "last_error": str(exc),
             "balances": {},
         }
+        testnet = testnet_status_payload(adapter, status)
 
     return jsonify({
         "ok": True,
         "mode": mode,
+        "requested_mode": getattr(adapter, "requested_mode", config.EXECUTION_MODE),
+        "testnet": testnet,
         "available_modes": ["PAPER", "TESTNET"],
         "allow_live": bool(config.ALLOW_LIVE_TRADING),
         "open_positions": open_positions,
@@ -931,15 +946,28 @@ def api_execution_mode():
     except (ValueError, RuntimeError) as exc:
         return jsonify({"ok": False, "error": str(exc), "mode": current}), 400
 
-    set_execution_adapter(adapter)
-    config.EXECUTION_MODE = str(requested).strip().upper()
-    logger.warning("🔁 Modo de execução alterado: %s -> %s", current, config.EXECUTION_MODE)
+    # A fábrica pode devolver PAPER se a TESTNET estiver fora do ar: o modo
+    # persistido deve ser o modo real do adaptador, nunca o solicitado.
+    actual_mode = getattr(adapter, "mode", requested)
+    connection = adapter.status()
+    testnet = testnet_status_payload(adapter, connection)
 
-    return jsonify({
+    set_execution_adapter(adapter)
+    config.EXECUTION_MODE = actual_mode
+    logger.warning("🔁 Modo de execução alterado: %s -> %s", current, actual_mode)
+
+    body = {
         "ok": True,
-        "mode": config.EXECUTION_MODE,
-        "connection": adapter.status(),
-    })
+        "mode": actual_mode,
+        "requested_mode": requested,
+        "testnet": testnet,
+        "connection": connection,
+    }
+    if testnet["fallback"]:
+        body["warning"] = (
+            f"TESTNET indisponível: {testnet['reason']}. Operando em fallback PAPER."
+        )
+    return jsonify(body)
 
 
 @app.route("/api/execution/test-connection", methods=["POST"])
@@ -949,14 +977,23 @@ def api_execution_test_connection():
         result = get_execution_adapter().test_connection()
     except Exception as exc:
         logger.exception("Falha no teste de conexão com a exchange")
+        degrade_execution_to_paper(
+            {"ok": False, "error_type": type(exc).__name__, "error": str(exc)},
+            "teste de conexão",
+        )
         return jsonify({
             "ok": False,
             "error": str(exc),
             "mode": getattr(get_execution_adapter(), "mode", "PAPER"),
+            "testnet": testnet_status_payload(get_execution_adapter()),
         }), 502
 
     if not result.get("ok"):
-        return jsonify(result), 502
+        degrade_execution_to_paper(result, "teste de conexão")
+        return jsonify({
+            **result,
+            "testnet": testnet_status_payload(get_execution_adapter()),
+        }), 502
     return jsonify(result)
 
 
@@ -1426,6 +1463,49 @@ def api_ml_train():
         return jsonify({"ok": False, "error": str(exc)}), 500
     finally:
         _ml_training_lock.release()
+
+
+# ----------------------------------------------------------------------------
+# BACKUP RÁPIDO
+# ----------------------------------------------------------------------------
+
+BACKUP_SOURCES = ("historico.db", "ml_model.joblib", "runtime_config.json")
+
+
+@app.route("/api/backup", methods=["POST"])
+def api_backup():
+    """
+    Copia histórico, modelo ML e config para backups/backup_YYYY-MM-DD_HH-MM/.
+
+    Não remove nada e nunca sobrescreve outro backup: o carimbo inclui minutos.
+    Arquivos ausentes são reportados, não tratados como erro.
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    destination = PROJECT_ROOT / "backups" / f"backup_{stamp}"
+    copied: List[str] = []
+    missing: List[str] = []
+
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in BACKUP_SOURCES:
+            source = PROJECT_ROOT / name
+            if source.is_file():
+                shutil.copy2(source, destination / name)
+                copied.append(name)
+            else:
+                missing.append(name)
+    except OSError as exc:
+        logger.exception("Falha ao criar backup")
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    logger.info("💾 Backup criado em %s: %s", destination, ", ".join(copied))
+    return jsonify({
+        "ok": True,
+        "directory": destination.name,
+        "path": str(destination),
+        "copied": copied,
+        "missing": missing,
+    })
 
 
 # ----------------------------------------------------------------------------

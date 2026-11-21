@@ -321,7 +321,70 @@ Sistema_trading/
 
 ---
 
-## Instalacao
+## Instalacao e uso no Windows (recomendado)
+
+Ambiente alvo: **Windows nativo**. Nao e necessario Docker, WSL ou Linux.
+
+**Prerequisitos**: Python 3.12 ou 3.13 e Node.js 18+ (com npm). Python 3.15
+ainda nao e compativel com o `ccxt` 4.5.x usado pelo projeto.
+
+**Preparacao unica (PowerShell ou Prompt de Comando na raiz do projeto):**
+
+```bat
+py -3.12 -m venv venv
+venv\Scripts\python.exe -m pip install -r requirements.txt
+if not exist .env copy .env.example .env
+```
+
+> O `run.bat` ja instala `requirements.txt` e `frontend\node_modules`
+> automaticamente se estiverem faltando. Ele prefere `venv\Scripts\activate.bat`
+> e, na ausencia, usa `.venv\Scripts\activate.bat`.
+
+**Rodar o painel:**
+
+```bat
+run.bat
+```
+
+No PowerShell, use `.\run.bat`. O launcher:
+
+1. libera as portas **5000** (API) e **5173** (Vite) se estiverem presas;
+2. ativa o venv e valida Python/dependencias;
+3. sobe o backend Flask e o frontend Vite no mesmo console;
+4. espera `GET /api/status` responder e abre **http://localhost:5173**;
+5. encerra os dois processos ao pressionar **qualquer tecla**, com Ctrl+C ou
+   ao fechar a janela — mesmo que o fechamento seja abrupto, graças ao Job
+   Object do Windows. Nao ficam processos fantasmas.
+
+**Resiliencia da Binance Testnet:** com `EXECUTION_MODE=TESTNET` no `.env`, a
+conexao e validada antes de iniciar o motor. Se `testnet.binance.vision` estiver
+fora do ar, instavel ou com erro de autenticacao/rede, o sistema **nao trava**:
+muda automaticamente para `PAPER` local, registra o motivo nos logs e expoe o
+estado em `GET /api/execution/status` (`campo "testnet"`). A Sala de Controle
+mostra um dos tres estados: **Online**, **Indisponível (operando em fallback
+PAPER)** ou **Desativada**. Nenhuma ordem real e enviada no fallback.
+
+**Backup rapido:**
+
+```bat
+backup.bat
+```
+
+Ou use o botao **Fazer backup agora** na aba **ML & Console**. Ambos copiam
+`historico.db`, `ml_model.joblib` e `runtime_config.json` para
+`backups\backup_YYYY-MM-DD_HH-MM\`. O diretorio `backups\` e ignorado pelo Git.
+O endpoint equivalente e `POST /api/backup`.
+
+**Validacao local no Windows:**
+
+```bat
+venv\Scripts\python.exe -m pytest -v
+cd frontend && npm run build
+```
+
+---
+
+## Instalacao (Linux/macOS — opcional)
 
 **Prerequisitos**: Python 3.8+ e, para o painel, Node.js 18+ (com npm).
 
@@ -357,7 +420,7 @@ cd frontend && npm install && cd ..
 
 ---
 
-## Como rodar com Docker (`docker compose up -d --build`)
+## Como rodar com Docker (`docker compose up -d --build`) — opcional
 
 Pré-requisitos: Docker Engine 24+ com Compose Plugin (ou Docker Desktop).
 Não é necessário instalar Python, Node, venv ou dependências na máquina host.
