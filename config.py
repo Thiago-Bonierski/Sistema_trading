@@ -229,10 +229,12 @@ BREAKOUT_CONFIDENCE = 0.68
 # de assertividade). Mantido em 0,58 para não estrangular o volume.
 ML_APPROVAL_THRESHOLD = 0.58       # Threshold para aprovar trades
 
-# Guardrails do filtro ML. O filtro só é aplicado quando o artefato em disco
-# comprova edge out-of-sample. Caso contrário o classificador opera em modo
-# observador (shadow) e NÃO bloqueia entradas.
-ML_SHADOW_MODE = True              # Calcula score e telemetra, mas não bloqueia
+# Guardrails do filtro ML. A filtragem é essencial para o sistema e portanto
+# fica ATIVA por padrão: sinais abaixo de ML_APPROVAL_THRESHOLD são bloqueados.
+# Ainda assim, o classificador cai automaticamente em modo observador (shadow)
+# quando o artefato em disco não comprova edge out-of-sample — os guardrails
+# continuam protegendo contra modelos degenerados, legados ou em quarentena.
+ML_SHADOW_MODE = False             # False = filtro ativo (bloqueia sinais fracos)
 ML_FEATURE_SCHEMA_VERSION = 2      # v2 = slope/momentum/range_rel/volatility_ratio persistidos
 ML_MODEL_SCHEMA_VERSION = 2        # Formato do artefato: {"pipeline", "metadata"}
 ML_MIN_UNIQUE_SCORES = 3           # Menos scores distintos que isso = modelo degenerado

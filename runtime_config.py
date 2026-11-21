@@ -826,19 +826,19 @@ PARAMETER_GUIDANCE: Dict[str, Dict[str, str]] = {
     "ML_SHADOW_MODE": {
         "impact_up": (
             "Ativa a observação: o classificador calcula e registra o score, "
-            "mas NUNCA bloqueia entradas. Útil para validar o modelo em "
-            "produção sem risco operacional."
+            "mas NUNCA bloqueia entradas. Reduz a proteção do sistema e deve "
+            "ser usado apenas para diagnóstico do modelo."
         ),
         "impact_down": (
-            "Ativa o bloqueio: sinais com score abaixo de "
-            "ML_APPROVAL_THRESHOLD são convertidos em NEUTRO. Só funciona "
-            "com um modelo validado (usable=True)."
+            "Já é o estado padrão: sinais com score abaixo de "
+            "ML_APPROVAL_THRESHOLD são convertidos em NEUTRO. É a proteção "
+            "essencial do motor contra entradas fracas."
         ),
-        "recommended": "Ativo (True) até o modelo provar edge out-of-sample",
+        "recommended": "Desativado (False) — filtro ativo por padrão",
         "tip": (
-            "A API /api/ml/toggle troca este valor e valida o modelo antes "
-            "de desligar o shadow. Artefatos degenerados, legados ou em "
-            "quarentena continuam em observação mesmo com este flag desligado."
+            "Os guardrails continuam valendo: sem um modelo validado, o "
+            "classificador opera em observação mesmo com este flag desligado. "
+            "A API /api/ml/toggle troca o valor e valida o modelo antes de ativar."
         ),
     },
     "ML_APPROVAL_THRESHOLD": {

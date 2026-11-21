@@ -105,6 +105,11 @@ def test_profiles_never_override_execution_costs():
         assert not PROTECTED_KEYS & profile.values.keys()
 
 
+def test_no_profile_disables_ml_filter():
+    for profile in TRADING_PROFILES:
+        assert profile.values.get("ML_SHADOW_MODE", False) is False
+
+
 def test_aggressive_and_capital_guard_are_real_opposites():
     aggressive = profile_by_id("aggressive").values
     guard = profile_by_id("capital_guard").values

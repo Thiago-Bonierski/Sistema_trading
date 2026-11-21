@@ -156,7 +156,7 @@ O painel e dividido em quatro abas:
 |---|---|
 | **Sala de Controle** | Status do motor (Ativo/Pausado), Start/Pause, **Panic Close**, saude do ML, cards de USD/BTC/ETH/SOL (preco, regime, sinal, posicao e SL/TP), KPIs de equity/win rate/drawdown e trades recentes. |
 | **Laboratorio de Simulacao** | Formulario de Ativo, Fonte (sintetico/banco/API), Ticks, Seed e Capital; funil de decisoes (sinais brutos → aprovados → executados e bloqueios por filtro); comparativo **RESEARCH vs PAPER_TRADING**; tabela auditavel de trades e historico de relatorios. |
-| **Calibragem Visual** | Secoes Stop/TP, Multiplicador Cripto, Limites de Risco, Filtros de Regime, Filtros de Exaustao e ML. Alteracoes so entram em vigor em **Salvar e Aplicar** (atomico) e podem ser revertidas com **Restaurar Padroes**. |
+| **Calibragem Visual** | **Perfis predefinidos** (Equilibrado, Maximo Lucro, Protecao de Capital, Scalping e Swing) e secoes Stop/TP, Multiplicador Cripto, Limites de Risco, Filtros de Regime, Filtros de Exaustao e ML. Alteracoes so entram em vigor em **Salvar e Aplicar** (atomico) e podem ser revertidas com **Restaurar Padroes**. |
 | **ML & Console** | Status do RandomForest (modo modelo/heuristica, acuracia, amostras, threshold, features), botao **Retreinar Agora** e console de logs com filtro INFO/WARNING/ERROR, busca textual e auto-refresh. |
 
 O frontend roda em `http://127.0.0.1:5173` e faz proxy de `/api` para o Flask em
@@ -202,6 +202,10 @@ sem reiniciar o servidor, pela aba Calibragem ou pela API.
 - Ao salvar, o gerenciador sincroniza ao vivo `PositionManager`, `RiskController`,
   `MLClassifier` e as engines do orquestrador, sem tocar no codigo Python.
 - A aplicacao e atomica: se qualquer valor for invalido, nada e alterado.
+- O filtro ML fica **ativo por padrao** (`ML_SHADOW_MODE=False`): sinais abaixo
+  do threshold sao bloqueados. Os guardrails mantem o classificador em
+  observacao automaticamente enquanto o modelo nao prova edge out-of-sample,
+  e nenhum perfil predefinido desativa essa protecao.
 - `Restaurar Padroes` remove todos os overrides e reaplica os defaults de
   `config.py` imediatamente.
 

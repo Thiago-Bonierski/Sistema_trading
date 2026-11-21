@@ -234,6 +234,9 @@ class TestMlToggleApi:
 # ============================================================================
 
 class TestParametrosBooleanos:
+    def test_padrao_fabrica_mantem_filtro_ml_ativo(self):
+        assert config.ML_SHADOW_MODE is False
+
     def test_spec_boolean_existe_com_metadados(self):
         spec = next(
             item for item in PARAMETER_SPECS if item.key == "ML_SHADOW_MODE"

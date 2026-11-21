@@ -76,9 +76,9 @@ TRADING_PROFILES: Tuple[TradingProfile, ...] = (
         tagline="Mais exposição, mais sinais, mais risco.",
         description=(
             "Amplia posições para 10% do equity, aceita sinais a partir de "
-            "25% de confiança, abre até 4 posições e deixa o ML apenas "
-            "observando. Busca capturar movimentos grandes com folga para "
-            "os stops."
+            "25% de confiança, abre até 4 posições e mantém o filtro ML ativo "
+            "com threshold reduzido para 45%. Busca capturar movimentos "
+            "grandes com folga para os stops."
         ),
         risk="alto",
         icon="Flame",
@@ -89,7 +89,7 @@ TRADING_PROFILES: Tuple[TradingProfile, ...] = (
             "BASE_POSITION_SIZE_PCT",
             "MIN_CONFIDENCE_FACTOR",
             "EQUITY_DRAWDOWN_LIMIT",
-            "ML_SHADOW_MODE",
+            "ML_APPROVAL_THRESHOLD",
         ),
         values={
             "DEFAULT_STOP_LOSS_PCT": 0.014,
@@ -123,7 +123,7 @@ TRADING_PROFILES: Tuple[TradingProfile, ...] = (
             "COOLDOWN_AFTER_STOP": {"NORMAL": 2, "REDUCED": 5, "PROTECT": 10},
             "MIN_NEW_HIGHS_FOR_REACTIVATION": 2,
             "TREND_CONFIRMATION_TICKS": 2,
-            "ML_SHADOW_MODE": True,
+            "ML_SHADOW_MODE": False,
             "ML_APPROVAL_THRESHOLD": 0.45,
         },
     ),
@@ -235,7 +235,7 @@ TRADING_PROFILES: Tuple[TradingProfile, ...] = (
             "COOLDOWN_AFTER_STOP": {"NORMAL": 3, "REDUCED": 6, "PROTECT": 12},
             "MIN_NEW_HIGHS_FOR_REACTIVATION": 3,
             "TREND_CONFIRMATION_TICKS": 2,
-            "ML_SHADOW_MODE": True,
+            "ML_SHADOW_MODE": False,
             "ML_APPROVAL_THRESHOLD": 0.50,
         },
     ),
@@ -322,6 +322,12 @@ def validate_profiles(manager=None) -> None:
             raise ValueError(
                 f"Perfil {profile.id} não pode alterar custos: "
                 f"{', '.join(sorted(blocked))}"
+            )
+
+        # Filtragem ML é essencial: nenhum perfil pode colocá-la em shadow.
+        if profile.values.get("ML_SHADOW_MODE", False) is not False:
+            raise ValueError(
+                f"Perfil {profile.id} não pode desativar o filtro ML"
             )
 
         for key in profile.highlights:
