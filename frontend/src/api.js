@@ -74,6 +74,7 @@ export const api = {
     get(`/api/simulations/${encodeURIComponent(filename)}`),
 
   config: () => get('/api/config'),
+  configProfiles: () => get('/api/config/profiles'),
   saveConfig: (values) => post('/api/config', { values }),
   resetConfig: () => post('/api/config/reset', {}),
 

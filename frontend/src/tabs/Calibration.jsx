@@ -4,17 +4,23 @@ import {
   ArrowUp,
   BrainCircuit,
   Bitcoin,
+  Check,
   Coins,
+  Flame,
   Gauge,
   Info,
   Lightbulb,
   RotateCcw,
   Save,
+  Scale,
   ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
+  TrendingUp,
   Undo2,
   Waves,
+  Zap,
 } from 'lucide-react'
 import { api } from '../api.js'
 import {
@@ -26,7 +32,11 @@ import {
   SectionTitle,
   ToggleSwitch,
 } from '../components/ui.jsx'
-import { formatDateTime, formatNumber } from '../lib/format.js'
+import {
+  formatDateTime,
+  formatFractionPercent,
+  formatNumber,
+} from '../lib/format.js'
 
 const DICT_KEY_LABELS = {
   NORMAL: 'Normal',
@@ -48,6 +58,140 @@ const PERCENT_HINTS = new Set([
   'TRADING_FEE_PCT',
   'SLIPPAGE_PCT',
 ])
+
+const RISK_LABELS = {
+  baixo: { label: 'Risco baixo', variant: 'emerald' },
+  medio: { label: 'Risco médio', variant: 'amber' },
+  alto: { label: 'Risco alto', variant: 'rose' },
+}
+
+const PROFILE_ICONS = {
+  Scale,
+  Flame,
+  ShieldCheck,
+  Zap,
+  TrendingUp,
+}
+
+const PROFILE_TONES = {
+  emerald: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300',
+  sky: 'border-sky-400/30 bg-sky-400/10 text-sky-300',
+  amber: 'border-amber-400/30 bg-amber-400/10 text-amber-300',
+  violet: 'border-violet-400/30 bg-violet-400/10 text-violet-300',
+  rose: 'border-rose-400/30 bg-rose-400/10 text-rose-300',
+}
+
+const SHORT_LABELS = {
+  NORMAL: 'N',
+  REDUCED: 'R',
+  PROTECT: 'P',
+  TENDENCIA_ALTA: 'Alta',
+  TENDENCIA_BAIXA: 'Baixa',
+  CONSOLIDACAO: 'Cons.',
+  TRANSICAO: 'Trans.',
+  ALTA_VOLATILIDADE: 'Volátil',
+}
+
+function formatProfileValue(key, value, types) {
+  if (value === null || value === undefined) return '—'
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const entries = Object.entries(value)
+    const relevant = entries.some(([, item]) => Number(item) > 0)
+      ? entries.filter(([, item]) => Number(item) > 0)
+      : entries
+    return relevant
+      .slice(0, 2)
+      .map(
+        ([innerKey, innerValue]) =>
+          `${SHORT_LABELS[innerKey] || innerKey} ${innerValue}`,
+      )
+      .join(' · ')
+  }
+  if (types[key] === 'bool') return value ? 'ativado' : 'desativado'
+  if (PERCENT_HINTS.has(key)) return formatFractionPercent(value, 2)
+  return formatNumber(value, Number.isInteger(value) ? 0 : 2)
+}
+
+function ProfileCard({ profile, types, active, disabled, onApply }) {
+  const Icon = PROFILE_ICONS[profile.icon] || Sparkles
+  const tone = PROFILE_TONES[profile.tone] || PROFILE_TONES.sky
+  const risk = RISK_LABELS[profile.risk] || RISK_LABELS.medio
+
+  return (
+    <div
+      className={`flex h-full flex-col rounded-xl border p-4 transition ${
+        active
+          ? 'border-emerald-400/40 bg-emerald-400/[0.05]'
+          : 'border-white/[0.07] bg-slate-950/30 hover:border-white/15'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl border ${tone}`}>
+          <Icon size={17} />
+        </div>
+        <Badge variant={risk.variant}>{risk.label}</Badge>
+      </div>
+
+      <h3 className="mt-3 text-sm font-semibold text-slate-100">{profile.name}</h3>
+      <p className="mt-0.5 text-[11px] font-medium text-slate-400">{profile.tagline}</p>
+      <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+        {profile.description}
+      </p>
+
+      <div className="mt-3 space-y-1.5 rounded-lg border border-white/[0.05] bg-white/[0.02] px-2.5 py-2">
+        <p className="flex gap-1.5 text-[10px] leading-relaxed text-slate-400">
+          <ArrowUp size={11} className="mt-0.5 shrink-0 text-emerald-400" />
+          <span>
+            <span className="font-semibold text-emerald-300/90">Vantagem:</span>{' '}
+            {profile.upside}
+          </span>
+        </p>
+        <p className="flex gap-1.5 text-[10px] leading-relaxed text-slate-400">
+          <ArrowDown size={11} className="mt-0.5 shrink-0 text-amber-400" />
+          <span>
+            <span className="font-semibold text-amber-300/90">Preço:</span>{' '}
+            {profile.downside}
+          </span>
+        </p>
+      </div>
+
+      {profile.highlights.length ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {profile.highlights.map((key) => (
+            <span
+              key={key}
+              className="rounded-md border border-white/[0.07] bg-white/[0.03] px-1.5 py-1 font-mono text-[10px] text-slate-300"
+            >
+              {formatProfileValue(key, profile.values[key], types)}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-3">
+          <span className="rounded-md border border-sky-400/20 bg-sky-400/10 px-1.5 py-1 text-[10px] text-sky-300">
+            Todos os padrões
+          </span>
+        </div>
+      )}
+
+      <div className="mt-auto pt-4">
+        <Button
+          variant={active ? 'primary' : 'ghost'}
+          className="w-full"
+          disabled={disabled}
+          onClick={() => onApply(profile)}
+        >
+          {active ? <Check size={15} /> : <SlidersHorizontal size={15} />}
+          {active
+            ? 'Perfil carregado'
+            : profile.reset
+              ? 'Restaurar padrões'
+              : 'Carregar perfil'}
+        </Button>
+      </div>
+    </div>
+  )
+}
 
 const SECTION_ICONS = {
   stops: ShieldAlert,
@@ -269,6 +413,8 @@ function ParameterField({ parameter, draftValue, currentValue, onChange, onRever
 
 export default function Calibration() {
   const [snapshot, setSnapshot] = useState(null)
+  const [profiles, setProfiles] = useState([])
+  const [activeProfile, setActiveProfile] = useState(null)
   const [draft, setDraft] = useState({})
   const [error, setError] = useState('')
   const [notice, setNotice] = useState(null)
@@ -279,9 +425,13 @@ export default function Calibration() {
   async function load() {
     setLoading(true)
     try {
-      const payload = await api.config()
-      setSnapshot(payload)
-      setDraft(toDraftValues(payload.values))
+      const [configPayload, profilesPayload] = await Promise.all([
+        api.config(),
+        api.configProfiles(),
+      ])
+      setSnapshot(configPayload)
+      setProfiles(profilesPayload.profiles || [])
+      setDraft(toDraftValues(configPayload.values))
       setError('')
     } catch (exc) {
       setError(exc.message)
@@ -382,6 +532,7 @@ export default function Calibration() {
 
   function handleChange(key, value, innerKey = null) {
     setNotice(null)
+    setActiveProfile(null)
     setDraft((current) => {
       if (innerKey) {
         return {
@@ -398,6 +549,7 @@ export default function Calibration() {
 
   function handleRevert(key) {
     if (!snapshot) return
+    setActiveProfile(null)
     setDraft((current) => ({
       ...current,
       [key]: cloneValue(
@@ -409,7 +561,28 @@ export default function Calibration() {
   function handleRevertAll() {
     if (!snapshot) return
     setDraft(toDraftValues(snapshot.values))
+    setActiveProfile(null)
     setNotice(null)
+  }
+
+  function handleApplyProfile(profile) {
+    if (!snapshot) return
+    const base = profile.reset
+      ? snapshot.defaults || snapshot.values || {}
+      : snapshot.values || {}
+    const merged = { ...base, ...profile.values }
+
+    setDraft(toDraftValues(merged))
+    setActiveProfile(profile.id)
+    setError('')
+    setNotice({
+      type: 'info',
+      message: `Perfil “${profile.name}” carregado no formulário: ${
+        profile.reset
+          ? 'todos os parâmetros voltarão aos padrões de config.py'
+          : `${Object.keys(profile.values).length} parâmetro(s) preparado(s)`
+      }. Revise e clique em “Salvar e Aplicar”.`,
+    })
   }
 
   async function handleSave() {
@@ -460,6 +633,7 @@ export default function Calibration() {
     )
     if (!confirmed) return
 
+    setActiveProfile(null)
     setResetting(true)
     setError('')
     setNotice(null)
@@ -497,6 +671,39 @@ export default function Calibration() {
 
   return (
     <div className="space-y-5 animate-rise-in">
+      {profiles.length ? (
+        <Card className="p-4 sm:p-5">
+          <SectionTitle
+            icon={Sparkles}
+            title="Perfis de Estratégia"
+            subtitle="Escolha um ponto de partida: o perfil carrega os valores no formulário para você revisar antes de aplicar."
+            right={<Badge variant="violet">{profiles.length} perfis</Badge>}
+          />
+
+          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {profiles.map((profile) => (
+              <ProfileCard
+                key={profile.id}
+                profile={profile}
+                types={parameterTypes}
+                active={activeProfile === profile.id}
+                disabled={saving || resetting}
+                onApply={handleApplyProfile}
+              />
+            ))}
+          </div>
+
+          <Alert type="info" className="mt-4">
+            <span className="inline-flex items-center gap-1.5">
+              <Info size={13} /> Cada perfil altera apenas os parâmetros listados
+              nele; taxas, derrapagem e outras personalizações são preservadas.
+              O perfil Equilibrado restaura os padrões de fábrica. Nada muda no
+              motor até clicar em “Salvar e Aplicar”.
+            </span>
+          </Alert>
+        </Card>
+      ) : null}
+
       <Card className="p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <SectionTitle
@@ -511,6 +718,13 @@ export default function Calibration() {
                 <Badge variant={overriddenCount ? 'amber' : 'emerald'}>
                   {overriddenCount} override(s)
                 </Badge>
+                {activeProfile ? (
+                  <Badge variant="violet">
+                    Perfil:{' '}
+                    {profiles.find((p) => p.id === activeProfile)?.name ||
+                      activeProfile}
+                  </Badge>
+                ) : null}
                 {dirtyKeys.length ? (
                   <Badge variant="amber">{dirtyKeys.length} pendente(s)</Badge>
                 ) : null}

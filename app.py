@@ -28,6 +28,7 @@ import config
 from database import db_manager, init_database
 from logging_config import setup_logging
 from runtime_config import ConfigValidationError, runtime_config
+from trading_profiles import profiles_payload
 from monitor import (
     loop_monitoramento,
     stop_event,
@@ -641,6 +642,12 @@ def _pause_monitor_thread(timeout: float = 30.0) -> bool:
 def api_get_config():
     """Retorna todos os parâmetros calibráveis agrupados por categoria."""
     return jsonify({"ok": True, **runtime_config.get_snapshot()})
+
+
+@app.route("/api/config/profiles", methods=["GET"])
+def api_get_config_profiles():
+    """Lista os perfis predefinidos e os parâmetros que cada um altera."""
+    return jsonify({"ok": True, **profiles_payload()})
 
 
 @app.route("/api/config", methods=["POST"])

@@ -1003,6 +1003,39 @@ class RuntimeConfigManager:
     # Atualização
     # ------------------------------------------------------------------
 
+    def validate(
+        self,
+        updates: Mapping[str, Any],
+        *,
+        use_defaults: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Valida um conjunto de parâmetros sem persistir nem aplicar nada.
+
+        Usado para checar perfis predefinidos e prévias antes de tocar no
+        motor. Com ``use_defaults=True`` o cenário é avaliado como se não
+        existissem overrides (validação estática dos perfis).
+        """
+        if not isinstance(updates, Mapping):
+            raise ConfigValidationError("Payload deve ser um objeto de parâmetros")
+
+        with self._lock:
+            validated = self._validate_updates(updates)
+
+            if use_defaults:
+                candidate = {key: self._default_value(key) for key in self._specs}
+            else:
+                candidate = dict(self._overrides)
+                for key, value in validated.items():
+                    default = self._default_value(key)
+                    if value == default:
+                        candidate.pop(key, None)
+                    else:
+                        candidate[key] = value
+
+            self._validate_consistency(candidate)
+            return validated
+
     def update(self, updates: Mapping[str, Any]) -> Dict[str, Any]:
         """
         Valida e aplica um conjunto de parâmetros.
