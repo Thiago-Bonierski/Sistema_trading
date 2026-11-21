@@ -494,6 +494,42 @@ class TestControlApi:
         assert "kpis" in body
         assert "recent_trades" in body
 
+    def test_live_endpoint_always_emits_strict_json(self, client, monkeypatch):
+        """NaN/Inf jamais podem corromper o JSON lido pelo navegador."""
+        monkeypatch.setattr(
+            app_module,
+            "obter_kpis",
+            lambda: {
+                "trade_count": 1,
+                "win_rate": 1.0,
+                "avg_pnl": float("nan"),
+                "avg_duration": float("inf"),
+                "latest_trades": [
+                    {
+                        "entry_fee": float("nan"),
+                        "slippage_cost": float("inf"),
+                        "pnl": 12.5,
+                    }
+                ],
+            },
+        )
+
+        response = client.get("/api/live")
+        assert response.status_code == 200
+
+        text = response.get_data(as_text=True)
+        assert "NaN" not in text
+        assert "Infinity" not in text
+
+        def reject_constant(token):
+            raise AssertionError(f"JSON invalido: {token}")
+
+        body = json.loads(text, parse_constant=reject_constant)
+        trade = body["recent_trades"][0]
+        assert trade["entry_fee"] is None
+        assert trade["slippage_cost"] is None
+        assert trade["pnl"] == 12.5
+
 
 # ============================================================================
 # API — MACHINE LEARNING

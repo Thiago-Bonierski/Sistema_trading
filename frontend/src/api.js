@@ -7,7 +7,16 @@ async function parseResponse(response) {
     try {
       body = JSON.parse(text)
     } catch {
-      body = { error: text }
+      // Resposta com JSON corrompido (ex.: NaN literal) deve aparecer como
+      // erro explícito, nunca como um payload vazio que "parece" sucesso.
+      const error = new Error(
+        response.ok
+          ? 'Resposta inválida do servidor (JSON não pôde ser lido)'
+          : `Falha na requisição (HTTP ${response.status})`,
+      )
+      error.status = response.status
+      error.body = { error: text }
+      throw error
     }
   }
   if (!response.ok) {

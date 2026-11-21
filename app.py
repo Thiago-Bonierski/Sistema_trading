@@ -20,6 +20,7 @@ from typing import Dict, List, Any, Optional
 import logging
 
 from flask import Flask, render_template, jsonify, request
+from flask.json.provider import DefaultJSONProvider
 from flask_cors import CORS
 import pandas as pd
 
@@ -63,6 +64,42 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 # Criar app Flask
 app = Flask(__name__)
+
+
+def _json_safe(value: Any) -> Any:
+    """
+    Substitui valores não finitos (NaN/±Inf) por ``null`` antes de serializar.
+
+    ``jsonify`` do Python aceita NaN como literal, mas isso NÃO é JSON válido:
+    o ``JSON.parse`` do navegador rejeita a resposta inteira. Colunas antigas
+    do banco (taxas migradas depois) aparecem como NaN quando o pandas lê o
+    histórico, então a sanitização precisa acontecer em TODOS os endpoints.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    # Escalares numpy/pandas (np.float64, np.int64, ...) viram tipos Python.
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return _json_safe(value.item())
+        except (TypeError, ValueError):
+            return value
+    if value is pd.NA or value is pd.NaT:
+        return None
+    return value
+
+
+class StrictJSONProvider(DefaultJSONProvider):
+    """Garante que toda resposta da API seja JSON estritamente válido."""
+
+    def dumps(self, obj: Any, **kwargs: Any) -> str:
+        return super().dumps(_json_safe(obj), allow_nan=False, **kwargs)
+
+
+app.json = StrictJSONProvider(app)
 
 # CORS para o painel React/Vite (frontend em outra porta)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -202,15 +239,21 @@ def obter_kpis() -> Dict[str, Any]:
         wins = int((df["pnl"] >= 0).sum())
         avg_pnl = float(df["pnl"].mean())
         avg_duration = float(df["duration_ticks"].mean())
-        
-        # Converter últimos trades para dicts
-        latest_trades = df.to_dict("records")
-        
+
+        # Colunas de custo adicionadas por migração podem estar nulas em
+        # trades antigos. O pandas transforma NULL em NaN, que geraria JSON
+        # inválido e derrubaria a Sala de Controle inteira.
+        latest_trades = (
+            df.astype(object).where(pd.notna(df), None).to_dict("records")
+        )
+
         kpis = {
             "trade_count": total,
             "win_rate": round(wins / total if total else 0.0, 4),
-            "avg_pnl": round(avg_pnl, 6),
-            "avg_duration": round(avg_duration, 2),
+            "avg_pnl": round(avg_pnl, 6) if math.isfinite(avg_pnl) else 0.0,
+            "avg_duration": (
+                round(avg_duration, 2) if math.isfinite(avg_duration) else 0.0
+            ),
             "latest_trades": latest_trades,
         }
         
