@@ -593,8 +593,16 @@ export default function Calibration() {
 
     const values = {}
     for (const key of dirtyKeys) {
-      const normalized = normalizeValue(draft[key], parameterTypes[key])
-      if (typeof normalized === 'object') {
+      const type = parameterTypes[key]
+      const normalized = normalizeValue(draft[key], type)
+      if (type === 'bool') {
+        // Booleanos (ex.: ML_SHADOW_MODE) não são números: Number.isFinite
+        // rejeita true/false e gerava um erro falso ao salvar perfis.
+        if (typeof normalized !== 'boolean') {
+          setError(`O parâmetro ${key} precisa ser verdadeiro ou falso.`)
+          return
+        }
+      } else if (typeof normalized === 'object') {
         const empty = Object.values(normalized).some(
           (value) => !Number.isFinite(value),
         )
